@@ -1126,9 +1126,8 @@ st.markdown(
 
 
 
-    /* ФІКСОВАНА DESKTOP-КОМПОЗИЦІЯ З АВТОМАТИЧНИМ МАСШТАБУВАННЯМ
-       Верстка не перебудовується, але весь макет зменшується як єдине ціле
-       і залишається точно по центру екрана. */
+    /* DESKTOP: фіксована преміальна композиція.
+       MOBILE: окрема мобільна версія без масштабування всієї сторінки. */
     :root {
         --site-fixed-width: 1320px;
         --site-inner-width: 1300px;
@@ -1147,124 +1146,335 @@ st.markdown(
         overflow-x: hidden !important;
     }
 
-    /* Центрування робиться через margin auto, а не left:50%.
-       Масштабування — через zoom, тому контейнер не зсувається праворуч / ліворуч. */
-    .block-container {
-        width: var(--site-fixed-width) !important;
-        min-width: var(--site-fixed-width) !important;
-        max-width: var(--site-fixed-width) !important;
-        box-sizing: border-box !important;
-        padding-left: 0 !important;
-        padding-right: 0 !important;
-        margin-left: auto !important;
-        margin-right: auto !important;
-        position: relative !important;
-        left: auto !important;
-        right: auto !important;
-        transform: none !important;
-        transform-origin: top center !important;
-        zoom: 1;
+    /* Desktop-версія лишається такою, як була: фіксована, центрована, без роз'їзду. */
+    @media (min-width: 821px) {
+        .block-container {
+            width: var(--site-fixed-width) !important;
+            min-width: var(--site-fixed-width) !important;
+            max-width: var(--site-fixed-width) !important;
+            box-sizing: border-box !important;
+            padding-left: 0 !important;
+            padding-right: 0 !important;
+            margin-left: auto !important;
+            margin-right: auto !important;
+            position: relative !important;
+            left: auto !important;
+            right: auto !important;
+            transform: none !important;
+            transform-origin: top center !important;
+            zoom: 1;
+        }
+        @media (max-width: 1390px) { .block-container { zoom: 0.985; } }
+        @media (max-width: 1320px) { .block-container { zoom: 0.94; } }
+        @media (max-width: 1240px) { .block-container { zoom: 0.88; } }
+        @media (max-width: 1160px) { .block-container { zoom: 0.82; } }
+        @media (max-width: 1080px) { .block-container { zoom: 0.76; } }
+        @media (max-width: 980px)  { .block-container { zoom: 0.69; } }
+        @media (max-width: 900px)  { .block-container { zoom: 0.63; } }
+
+        .hero-panel {
+            display: grid !important;
+            grid-template-columns: 842px 400px !important;
+            gap: 58px !important;
+            align-items: flex-start !important;
+            width: var(--site-inner-width) !important;
+            min-width: var(--site-inner-width) !important;
+            max-width: var(--site-inner-width) !important;
+            margin-left: auto !important;
+            margin-right: auto !important;
+        }
+        .hero-text {
+            width: 842px !important;
+            min-width: 842px !important;
+            max-width: 842px !important;
+        }
+        .site-brand {
+            font-size: 96px !important;
+            white-space: nowrap !important;
+            letter-spacing: 0.026em !important;
+            line-height: 0.90 !important;
+        }
+        .site-subtitle {
+            font-size: 22px !important;
+            line-height: 1.22 !important;
+            white-space: nowrap !important;
+        }
+        .hero-quote {
+            font-size: 32px !important;
+            max-width: 720px !important;
+            white-space: normal !important;
+        }
+        .hero-portrait-card {
+            width: 400px !important;
+            min-width: 400px !important;
+            height: 415px !important;
+            min-height: 415px !important;
+        }
+        div[data-baseweb="tab-list"] {
+            width: var(--site-inner-width) !important;
+            min-width: var(--site-inner-width) !important;
+            max-width: var(--site-inner-width) !important;
+            flex-wrap: nowrap !important;
+            overflow: visible !important;
+            margin-left: auto !important;
+            margin-right: auto !important;
+        }
+        button[role="tab"] {
+            flex: 0 0 auto !important;
+            white-space: nowrap !important;
+        }
+        [data-testid="stForm"] {
+            width: var(--site-inner-width) !important;
+            min-width: var(--site-inner-width) !important;
+            max-width: var(--site-inner-width) !important;
+            box-sizing: border-box !important;
+            margin-left: auto !important;
+            margin-right: auto !important;
+        }
+        [data-testid="stForm"] textarea { min-width: 0 !important; }
+        .kwic-wrapper,
+        .register-card,
+        .corpus-card-grid,
+        .about-text,
+        .citation-box,
+        .site-footer {
+            max-width: var(--site-inner-width) !important;
+            margin-left: auto !important;
+            margin-right: auto !important;
+        }
     }
 
-    /* Масштаб під ширину екрана. На телефоні сайт не розлазиться,
-       а пропорційно зменшується як цілісний макет. */
-    @media (max-width: 1390px) { .block-container { zoom: 0.985; } }
-    @media (max-width: 1320px) { .block-container { zoom: 0.94; } }
-    @media (max-width: 1240px) { .block-container { zoom: 0.88; } }
-    @media (max-width: 1160px) { .block-container { zoom: 0.82; } }
-    @media (max-width: 1080px) { .block-container { zoom: 0.76; } }
-    @media (max-width: 980px)  { .block-container { zoom: 0.69; } }
-    @media (max-width: 900px)  { .block-container { zoom: 0.63; } }
-    @media (max-width: 820px)  { .block-container { zoom: 0.57; } }
-    @media (max-width: 760px)  { .block-container { zoom: 0.52; } }
-    @media (max-width: 680px)  { .block-container { zoom: 0.47; } }
-    @media (max-width: 600px)  { .block-container { zoom: 0.41; } }
-    @media (max-width: 520px)  { .block-container { zoom: 0.36; } }
-    @media (max-width: 460px)  { .block-container { zoom: 0.315; } }
-    @media (max-width: 420px)  { .block-container { zoom: 0.288; } }
-    @media (max-width: 390px)  { .block-container { zoom: 0.266; } }
-    @media (max-width: 360px)  { .block-container { zoom: 0.245; } }
+    /* MOBILE: окрема мобільна версія. Нічого не зменшується як картинка,
+       користувач може нормально читати, натискати й збільшувати пальцями. */
+    @media (max-width: 820px) {
+        html, body, .stApp, [data-testid="stAppViewContainer"] {
+            width: 100% !important;
+            min-width: 0 !important;
+            max-width: 100% !important;
+            overflow-x: hidden !important;
+            -webkit-text-size-adjust: 100% !important;
+            touch-action: pan-x pan-y pinch-zoom !important;
+        }
+        .block-container {
+            width: 100% !important;
+            min-width: 0 !important;
+            max-width: 100% !important;
+            padding: 0.85rem 1rem 1.35rem 1rem !important;
+            margin: 0 auto !important;
+            left: auto !important;
+            right: auto !important;
+            transform: none !important;
+            zoom: 1 !important;
+            box-sizing: border-box !important;
+        }
 
-    .hero-panel {
-        display: grid !important;
-        grid-template-columns: 842px 400px !important;
-        gap: 58px !important;
-        align-items: flex-start !important;
-        width: var(--site-inner-width) !important;
-        min-width: var(--site-inner-width) !important;
-        max-width: var(--site-inner-width) !important;
-        margin-left: auto !important;
-        margin-right: auto !important;
-    }
-    .hero-text {
-        width: 842px !important;
-        min-width: 842px !important;
-        max-width: 842px !important;
-    }
-    .site-brand {
-        font-size: 96px !important;
-        white-space: nowrap !important;
-        letter-spacing: 0.026em !important;
-        line-height: 0.90 !important;
-    }
-    .site-subtitle {
-        font-size: 22px !important;
-        line-height: 1.22 !important;
-        white-space: nowrap !important;
-    }
-    .hero-quote {
-        font-size: 32px !important;
-        max-width: 720px !important;
-        white-space: normal !important;
-    }
-    .hero-portrait-card {
-        width: 400px !important;
-        min-width: 400px !important;
-        height: 415px !important;
-        min-height: 415px !important;
-    }
-    div[data-baseweb="tab-list"] {
-        width: var(--site-inner-width) !important;
-        min-width: var(--site-inner-width) !important;
-        max-width: var(--site-inner-width) !important;
-        flex-wrap: nowrap !important;
-        overflow: visible !important;
-        margin-left: auto !important;
-        margin-right: auto !important;
-    }
-    button[role="tab"] {
-        flex: 0 0 auto !important;
-        white-space: nowrap !important;
-    }
-    [data-testid="stForm"] {
-        width: var(--site-inner-width) !important;
-        min-width: var(--site-inner-width) !important;
-        max-width: var(--site-inner-width) !important;
-        box-sizing: border-box !important;
-        margin-left: auto !important;
-        margin-right: auto !important;
-    }
-    [data-testid="stForm"] textarea { min-width: 0 !important; }
-    .kwic-wrapper,
-    .register-card,
-    .corpus-card-grid,
-    .about-text,
-    .citation-box,
-    .site-footer {
-        max-width: var(--site-inner-width) !important;
-        margin-left: auto !important;
-        margin-right: auto !important;
-    }
+        .hero-panel {
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: center !important;
+            justify-content: flex-start !important;
+            width: 100% !important;
+            min-width: 0 !important;
+            max-width: 100% !important;
+            gap: 1.05rem !important;
+            margin: 0 auto 1rem auto !important;
+            padding: 0.55rem 0 0.7rem 0 !important;
+            text-align: center !important;
+        }
+        .hero-text {
+            width: 100% !important;
+            min-width: 0 !important;
+            max-width: 100% !important;
+            padding-top: 0 !important;
+            text-align: center !important;
+            order: 1;
+        }
+        .site-brand {
+            display: block !important;
+            font-size: clamp(42px, 12.2vw, 62px) !important;
+            line-height: 0.95 !important;
+            letter-spacing: 0.018em !important;
+            white-space: normal !important;
+            overflow-wrap: normal !important;
+            word-break: keep-all !important;
+            text-align: center !important;
+            margin: 0 auto 0.35rem auto !important;
+        }
+        .site-subtitle {
+            font-size: clamp(15px, 4.3vw, 20px) !important;
+            line-height: 1.28 !important;
+            white-space: normal !important;
+            max-width: 94vw !important;
+            margin: 0.15rem auto 0.9rem auto !important;
+            text-align: center !important;
+        }
+        .hero-quote {
+            font-size: clamp(19px, 5.6vw, 26px) !important;
+            line-height: 1.25 !important;
+            max-width: min(92vw, 520px) !important;
+            padding-left: 2.55rem !important;
+            margin: 0 auto !important;
+            text-align: left !important;
+            white-space: normal !important;
+        }
+        .hero-quote::before {
+            left: 0.58rem !important;
+            top: -0.9rem !important;
+            font-size: 58px !important;
+        }
+        .hero-quote::after {
+            left: 0 !important;
+            top: 0.05rem !important;
+            height: calc(100% - 0.05rem) !important;
+        }
+        .hero-portrait-card {
+            order: 2;
+            width: min(72vw, 310px) !important;
+            min-width: 0 !important;
+            height: auto !important;
+            aspect-ratio: 0.96 / 1 !important;
+            margin: 0.25rem auto 0 auto !important;
+            border-width: 4px !important;
+            border-radius: 20px !important;
+        }
+        .hero-portrait-card img {
+            object-position: center 17% !important;
+        }
 
-    /* Невелике коригування висоти на телефоні після zoom. */
-    @media (max-width: 760px) {
-        .block-container { margin-bottom: -36rem !important; }
-    }
-    @media (max-width: 520px) {
-        .block-container { margin-bottom: -48rem !important; }
-    }
-    @media (max-width: 390px) {
-        .block-container { margin-bottom: -58rem !important; }
+        div[data-baseweb="tab-list"] {
+            width: 100% !important;
+            min-width: 0 !important;
+            max-width: 100% !important;
+            display: flex !important;
+            flex-wrap: nowrap !important;
+            overflow-x: auto !important;
+            overflow-y: hidden !important;
+            gap: 0.36rem !important;
+            margin: 0.25rem auto 0.9rem auto !important;
+            padding: 0 0 0.34rem 0 !important;
+            -webkit-overflow-scrolling: touch !important;
+            scrollbar-width: thin !important;
+            border-bottom: 1.5px solid rgba(235, 198, 111, 0.55) !important;
+        }
+        button[role="tab"] {
+            flex: 0 0 auto !important;
+            padding: 0.78rem 1rem 0.74rem 1rem !important;
+            font-size: 15.5px !important;
+            border-radius: 13px 13px 0 0 !important;
+            white-space: nowrap !important;
+            min-width: max-content !important;
+        }
+        button[role="tab"][aria-selected="true"] {
+            padding-left: 1.1rem !important;
+            padding-right: 1.1rem !important;
+            transform: none !important;
+        }
+
+        [data-testid="stForm"] {
+            width: 100% !important;
+            min-width: 0 !important;
+            max-width: 100% !important;
+            margin: 0.8rem auto 1rem auto !important;
+            padding: 1rem 0.9rem 1rem 0.9rem !important;
+            border-radius: 18px !important;
+            box-sizing: border-box !important;
+        }
+        [data-testid="stForm"] [data-testid="stHorizontalBlock"] {
+            display: flex !important;
+            flex-direction: column !important;
+            flex-wrap: nowrap !important;
+            gap: 0.75rem !important;
+            width: 100% !important;
+        }
+        [data-testid="stForm"] [data-testid="column"] {
+            width: 100% !important;
+            min-width: 0 !important;
+            max-width: 100% !important;
+            flex: 1 1 100% !important;
+        }
+        [data-testid="stTextArea"] textarea {
+            min-height: 86px !important;
+            font-size: 16px !important;
+        }
+        div[data-testid="stFormSubmitButton"] {
+            width: 100% !important;
+            justify-content: stretch !important;
+            margin-top: 0.1rem !important;
+        }
+        div[data-testid="stFormSubmitButton"] button {
+            width: 100% !important;
+            min-height: 52px !important;
+            font-size: 17px !important;
+        }
+        [data-testid="stForm"] [data-testid="stExpander"] {
+            width: 100% !important;
+            margin-top: 0.55rem !important;
+        }
+        [data-testid="stForm"] [data-testid="stSelectbox"],
+        [data-testid="stForm"] [data-testid="stNumberInput"],
+        [data-testid="stForm"] [data-testid="stCheckbox"],
+        [data-testid="stForm"] [data-testid="stRadio"] {
+            width: 100% !important;
+            max-width: 100% !important;
+        }
+
+        .register-card,
+        .kwic-wrapper,
+        .corpus-card-grid,
+        .about-text,
+        .citation-box,
+        .site-footer {
+            width: 100% !important;
+            min-width: 0 !important;
+            max-width: 100% !important;
+            margin-left: auto !important;
+            margin-right: auto !important;
+            box-sizing: border-box !important;
+        }
+        .register-card {
+            padding: 1rem 0.85rem !important;
+            border-radius: 18px !important;
+        }
+        .register-title {
+            font-size: clamp(25px, 8vw, 38px) !important;
+            line-height: 1.12 !important;
+            overflow-wrap: anywhere !important;
+        }
+        .register-pills {
+            display: flex !important;
+            flex-wrap: wrap !important;
+            justify-content: center !important;
+            gap: 0.45rem !important;
+        }
+        .kwic-row {
+            grid-template-columns: 1fr !important;
+            gap: 0.55rem !important;
+            padding: 0.8rem 0 !important;
+        }
+        .kwic-left, .kwic-right, .kwic-keyword {
+            text-align: left !important;
+            min-width: 0 !important;
+        }
+        .kwic-keyword { justify-content: flex-start !important; }
+        .kwic-keyword span { max-width: 100% !important; }
+
+        [data-testid="stDataFrame"],
+        .stDataFrame,
+        div[data-testid="stTable"],
+        div[data-testid="stDataFrame"] > div {
+            width: 100% !important;
+            max-width: 100% !important;
+            overflow-x: auto !important;
+            -webkit-overflow-scrolling: touch !important;
+        }
+        .stDownloadButton, .stDownloadButton button,
+        div[data-testid="stDownloadButton"], div[data-testid="stDownloadButton"] button,
+        div.stButton, div.stButton > button {
+            width: 100% !important;
+            max-width: 100% !important;
+        }
+        .site-motto { font-size: 21px !important; }
+        .site-footer { font-size: 14px !important; padding: 0.9rem 0.85rem !important; }
     }
 
     </style>
