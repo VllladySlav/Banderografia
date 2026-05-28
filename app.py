@@ -1255,11 +1255,19 @@ st.markdown(
             -webkit-text-size-adjust: 100% !important;
             touch-action: pan-x pan-y pinch-zoom !important;
         }
+        [data-testid="stAppViewContainer"] > .main,
+        [data-testid="stAppViewContainer"] section.main,
+        section[data-testid="stMain"] {
+            width: 100% !important;
+            min-width: 0 !important;
+            max-width: 100% !important;
+            overflow-x: hidden !important;
+        }
         .block-container {
             width: 100% !important;
             min-width: 0 !important;
             max-width: 100% !important;
-            padding: 0.85rem 1rem 1.35rem 1rem !important;
+            padding: 0.82rem 0.82rem 1.35rem 0.82rem !important;
             margin: 0 auto !important;
             left: auto !important;
             right: auto !important;
@@ -1268,6 +1276,7 @@ st.markdown(
             box-sizing: border-box !important;
         }
 
+        /* Мобільна шапка: назва → підзаголовок → цитата → світлина. */
         .hero-panel {
             display: flex !important;
             flex-direction: column !important;
@@ -1276,9 +1285,9 @@ st.markdown(
             width: 100% !important;
             min-width: 0 !important;
             max-width: 100% !important;
-            gap: 1.05rem !important;
-            margin: 0 auto 1rem auto !important;
-            padding: 0.55rem 0 0.7rem 0 !important;
+            gap: 0.86rem !important;
+            margin: 0 auto 0.95rem auto !important;
+            padding: 0.5rem 0 0.6rem 0 !important;
             text-align: center !important;
         }
         .hero-text {
@@ -1287,95 +1296,138 @@ st.markdown(
             max-width: 100% !important;
             padding-top: 0 !important;
             text-align: center !important;
-            order: 1;
+            order: 1 !important;
         }
         .site-brand {
             display: block !important;
-            font-size: clamp(42px, 12.2vw, 62px) !important;
-            line-height: 0.95 !important;
-            letter-spacing: 0.018em !important;
-            white-space: normal !important;
+            width: 100% !important;
+            max-width: 100% !important;
+            font-size: clamp(31px, 10.5vw, 58px) !important;
+            line-height: 0.98 !important;
+            letter-spacing: 0.011em !important;
+            white-space: nowrap !important;
             overflow-wrap: normal !important;
             word-break: keep-all !important;
             text-align: center !important;
-            margin: 0 auto 0.35rem auto !important;
+            margin: 0 auto 0.34rem auto !important;
         }
         .site-subtitle {
-            font-size: clamp(15px, 4.3vw, 20px) !important;
+            font-size: clamp(14px, 4.05vw, 19px) !important;
             line-height: 1.28 !important;
             white-space: normal !important;
-            max-width: 94vw !important;
-            margin: 0.15rem auto 0.9rem auto !important;
+            max-width: min(94vw, 520px) !important;
+            margin: 0.15rem auto 0.78rem auto !important;
             text-align: center !important;
         }
         .hero-quote {
-            font-size: clamp(19px, 5.6vw, 26px) !important;
+            display: block !important;
+            font-size: clamp(18px, 5.35vw, 25px) !important;
             line-height: 1.25 !important;
-            max-width: min(92vw, 520px) !important;
-            padding-left: 2.55rem !important;
+            max-width: min(91vw, 500px) !important;
+            padding-left: 2.25rem !important;
             margin: 0 auto !important;
             text-align: left !important;
             white-space: normal !important;
         }
         .hero-quote::before {
-            left: 0.58rem !important;
-            top: -0.9rem !important;
-            font-size: 58px !important;
+            left: 0.46rem !important;
+            top: -0.82rem !important;
+            font-size: 54px !important;
         }
         .hero-quote::after {
             left: 0 !important;
             top: 0.05rem !important;
             height: calc(100% - 0.05rem) !important;
         }
+        .hero-portrait-wrap {
+            order: 2 !important;
+            display: flex !important;
+            justify-content: center !important;
+            align-items: flex-start !important;
+            width: 100% !important;
+            min-width: 0 !important;
+            max-width: 100% !important;
+            margin: 0 auto !important;
+        }
         .hero-portrait-card {
-            order: 2;
-            width: min(72vw, 310px) !important;
+            width: min(70vw, 292px) !important;
             min-width: 0 !important;
             height: auto !important;
             aspect-ratio: 0.96 / 1 !important;
-            margin: 0.25rem auto 0 auto !important;
+            margin: 0.04rem auto 0 auto !important;
             border-width: 4px !important;
-            border-radius: 20px !important;
+            border-radius: 19px !important;
         }
         .hero-portrait-card img {
             object-position: center 17% !important;
         }
 
+        /* Вкладки на телефоні: 6 вкладок = 2 рядки по 3, без горизонтального гортання. */
         div[data-baseweb="tab-list"] {
             width: 100% !important;
             min-width: 0 !important;
             max-width: 100% !important;
-            display: flex !important;
-            flex-wrap: nowrap !important;
-            overflow-x: auto !important;
-            overflow-y: hidden !important;
+            display: grid !important;
+            grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+            grid-auto-rows: minmax(78px, auto) !important;
             gap: 0.36rem !important;
-            margin: 0.25rem auto 0.9rem auto !important;
-            padding: 0 0 0.34rem 0 !important;
-            -webkit-overflow-scrolling: touch !important;
-            scrollbar-width: thin !important;
+            overflow: visible !important;
+            margin: 0.18rem auto 0.92rem auto !important;
+            padding: 0 0 0.42rem 0 !important;
             border-bottom: 1.5px solid rgba(235, 198, 111, 0.55) !important;
+            box-sizing: border-box !important;
         }
         button[role="tab"] {
-            flex: 0 0 auto !important;
-            padding: 0.78rem 1rem 0.74rem 1rem !important;
-            font-size: 15.5px !important;
-            border-radius: 13px 13px 0 0 !important;
-            white-space: nowrap !important;
-            min-width: max-content !important;
+            width: 100% !important;
+            min-width: 0 !important;
+            max-width: 100% !important;
+            min-height: 78px !important;
+            height: auto !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            padding: 0.52rem 0.24rem 0.5rem 0.24rem !important;
+            font-size: clamp(11.4px, 3.35vw, 13.4px) !important;
+            border-radius: 13px !important;
+            white-space: normal !important;
+            overflow: hidden !important;
+            line-height: 1.12 !important;
+        }
+        button[role="tab"]::after { border-radius: 13px !important; }
+        button[role="tab"] p {
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: center !important;
+            justify-content: center !important;
+            gap: 0.27rem !important;
+            width: 100% !important;
+            max-width: 100% !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            text-align: center !important;
+            white-space: normal !important;
+            overflow-wrap: normal !important;
+            word-break: normal !important;
+            line-height: 1.13 !important;
+        }
+        button[role="tab"] p::before {
+            width: 19px !important;
+            height: 19px !important;
+            margin: 0 auto !important;
         }
         button[role="tab"][aria-selected="true"] {
-            padding-left: 1.1rem !important;
-            padding-right: 1.1rem !important;
+            padding-left: 0.24rem !important;
+            padding-right: 0.24rem !important;
             transform: none !important;
         }
 
+        /* Пошук і розширені налаштування: одна колонка, кнопка на всю ширину. */
         [data-testid="stForm"] {
             width: 100% !important;
             min-width: 0 !important;
             max-width: 100% !important;
-            margin: 0.8rem auto 1rem auto !important;
-            padding: 1rem 0.9rem 1rem 0.9rem !important;
+            margin: 0.75rem auto 1rem auto !important;
+            padding: 0.95rem 0.82rem 1rem 0.82rem !important;
             border-radius: 18px !important;
             box-sizing: border-box !important;
         }
@@ -1383,14 +1435,19 @@ st.markdown(
             display: flex !important;
             flex-direction: column !important;
             flex-wrap: nowrap !important;
-            gap: 0.75rem !important;
+            align-items: stretch !important;
+            gap: 0.72rem !important;
             width: 100% !important;
+            min-width: 0 !important;
+            max-width: 100% !important;
         }
         [data-testid="stForm"] [data-testid="column"] {
             width: 100% !important;
             min-width: 0 !important;
             max-width: 100% !important;
             flex: 1 1 100% !important;
+            padding-left: 0 !important;
+            padding-right: 0 !important;
         }
         [data-testid="stTextArea"] textarea {
             min-height: 86px !important;
@@ -1399,7 +1456,7 @@ st.markdown(
         div[data-testid="stFormSubmitButton"] {
             width: 100% !important;
             justify-content: stretch !important;
-            margin-top: 0.1rem !important;
+            margin-top: 0.02rem !important;
         }
         div[data-testid="stFormSubmitButton"] button {
             width: 100% !important;
@@ -1409,6 +1466,11 @@ st.markdown(
         [data-testid="stForm"] [data-testid="stExpander"] {
             width: 100% !important;
             margin-top: 0.55rem !important;
+        }
+        [data-testid="stForm"] [data-testid="stExpander"] [data-testid="stHorizontalBlock"] {
+            display: flex !important;
+            flex-direction: column !important;
+            gap: 0.72rem !important;
         }
         [data-testid="stForm"] [data-testid="stSelectbox"],
         [data-testid="stForm"] [data-testid="stNumberInput"],
@@ -1434,12 +1496,16 @@ st.markdown(
         .register-card {
             padding: 1rem 0.85rem !important;
             border-radius: 18px !important;
+            text-align: center !important;
         }
-        .register-title {
-            font-size: clamp(25px, 8vw, 38px) !important;
+        .register-title,
+        .headword {
+            font-size: clamp(24px, 7.5vw, 36px) !important;
             line-height: 1.12 !important;
             overflow-wrap: anywhere !important;
+            text-align: center !important;
         }
+        .register-metrics,
         .register-pills {
             display: flex !important;
             flex-wrap: wrap !important;
@@ -1457,6 +1523,10 @@ st.markdown(
         }
         .kwic-keyword { justify-content: flex-start !important; }
         .kwic-keyword span { max-width: 100% !important; }
+        .corpus-card-grid {
+            grid-template-columns: 1fr !important;
+            gap: 0.65rem !important;
+        }
 
         [data-testid="stDataFrame"],
         .stDataFrame,
@@ -1477,6 +1547,15 @@ st.markdown(
         .site-footer { font-size: 14px !important; padding: 0.9rem 0.85rem !important; }
     }
 
+    @media (max-width: 360px) {
+        .block-container { padding-left: 0.65rem !important; padding-right: 0.65rem !important; }
+        .site-brand { font-size: clamp(29px, 10.1vw, 38px) !important; letter-spacing: 0.006em !important; }
+        div[data-baseweb="tab-list"] { gap: 0.26rem !important; grid-auto-rows: minmax(74px, auto) !important; }
+        button[role="tab"] { min-height: 74px !important; font-size: 11px !important; padding-left: 0.12rem !important; padding-right: 0.12rem !important; }
+        button[role="tab"] p::before { width: 18px !important; height: 18px !important; }
+        .hero-portrait-card { width: min(76vw, 270px) !important; }
+    }
+
     </style>
     """,
     unsafe_allow_html=True,
@@ -1485,7 +1564,7 @@ st.markdown(
 portrait_html = ""
 if PORTRAIT_DATA_URI:
     portrait_html = (
-        "<div>"
+        "<div class='hero-portrait-wrap'>"
         f"<div class='hero-portrait-card'><img src='{PORTRAIT_DATA_URI}' alt='Степан Бандера'></div>"
         "</div>"
     )
