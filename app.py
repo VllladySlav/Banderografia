@@ -1124,15 +1124,149 @@ st.markdown(
     .site-footer a { text-decoration: none; }
     .site-footer a:hover { text-decoration: underline; }
 
-    @media (max-width: 900px) {
-        .hero-panel { display: flex; gap: 1rem; }
-        .site-brand { font-size: clamp(46px, 12vw, 70px); white-space: normal; }
-        .site-subtitle { font-size: 18px; }
-        .hero-quote { font-size: 22px; padding-left: 2.65rem; }
-        .hero-portrait-card { width: 150px; height: 190px; border-radius: 18px; }
-        .corpus-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        button[role="tab"] { font-size: 16px !important; padding: 0.72rem 0.9rem !important; }
+
+
+    /* ФІКСОВАНА DESKTOP-КОМПОЗИЦІЯ З АВТОМАТИЧНИМ МАСШТАБУВАННЯМ
+       Верстка не перебудовується, але весь макет зменшується як єдине ціле
+       і залишається точно по центру екрана. */
+    :root {
+        --site-fixed-width: 1320px;
+        --site-inner-width: 1300px;
     }
+
+    html, body, .stApp, [data-testid="stAppViewContainer"] {
+        width: 100% !important;
+        min-width: 0 !important;
+        overflow-x: hidden !important;
+    }
+    [data-testid="stAppViewContainer"] > .main,
+    [data-testid="stAppViewContainer"] section.main,
+    section[data-testid="stMain"] {
+        width: 100% !important;
+        min-width: 0 !important;
+        overflow-x: hidden !important;
+    }
+
+    /* Центрування робиться через margin auto, а не left:50%.
+       Масштабування — через zoom, тому контейнер не зсувається праворуч / ліворуч. */
+    .block-container {
+        width: var(--site-fixed-width) !important;
+        min-width: var(--site-fixed-width) !important;
+        max-width: var(--site-fixed-width) !important;
+        box-sizing: border-box !important;
+        padding-left: 0 !important;
+        padding-right: 0 !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+        position: relative !important;
+        left: auto !important;
+        right: auto !important;
+        transform: none !important;
+        transform-origin: top center !important;
+        zoom: 1;
+    }
+
+    /* Масштаб під ширину екрана. На телефоні сайт не розлазиться,
+       а пропорційно зменшується як цілісний макет. */
+    @media (max-width: 1390px) { .block-container { zoom: 0.985; } }
+    @media (max-width: 1320px) { .block-container { zoom: 0.94; } }
+    @media (max-width: 1240px) { .block-container { zoom: 0.88; } }
+    @media (max-width: 1160px) { .block-container { zoom: 0.82; } }
+    @media (max-width: 1080px) { .block-container { zoom: 0.76; } }
+    @media (max-width: 980px)  { .block-container { zoom: 0.69; } }
+    @media (max-width: 900px)  { .block-container { zoom: 0.63; } }
+    @media (max-width: 820px)  { .block-container { zoom: 0.57; } }
+    @media (max-width: 760px)  { .block-container { zoom: 0.52; } }
+    @media (max-width: 680px)  { .block-container { zoom: 0.47; } }
+    @media (max-width: 600px)  { .block-container { zoom: 0.41; } }
+    @media (max-width: 520px)  { .block-container { zoom: 0.36; } }
+    @media (max-width: 460px)  { .block-container { zoom: 0.315; } }
+    @media (max-width: 420px)  { .block-container { zoom: 0.288; } }
+    @media (max-width: 390px)  { .block-container { zoom: 0.266; } }
+    @media (max-width: 360px)  { .block-container { zoom: 0.245; } }
+
+    .hero-panel {
+        display: grid !important;
+        grid-template-columns: 842px 400px !important;
+        gap: 58px !important;
+        align-items: flex-start !important;
+        width: var(--site-inner-width) !important;
+        min-width: var(--site-inner-width) !important;
+        max-width: var(--site-inner-width) !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+    }
+    .hero-text {
+        width: 842px !important;
+        min-width: 842px !important;
+        max-width: 842px !important;
+    }
+    .site-brand {
+        font-size: 96px !important;
+        white-space: nowrap !important;
+        letter-spacing: 0.026em !important;
+        line-height: 0.90 !important;
+    }
+    .site-subtitle {
+        font-size: 22px !important;
+        line-height: 1.22 !important;
+        white-space: nowrap !important;
+    }
+    .hero-quote {
+        font-size: 32px !important;
+        max-width: 720px !important;
+        white-space: normal !important;
+    }
+    .hero-portrait-card {
+        width: 400px !important;
+        min-width: 400px !important;
+        height: 415px !important;
+        min-height: 415px !important;
+    }
+    div[data-baseweb="tab-list"] {
+        width: var(--site-inner-width) !important;
+        min-width: var(--site-inner-width) !important;
+        max-width: var(--site-inner-width) !important;
+        flex-wrap: nowrap !important;
+        overflow: visible !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+    }
+    button[role="tab"] {
+        flex: 0 0 auto !important;
+        white-space: nowrap !important;
+    }
+    [data-testid="stForm"] {
+        width: var(--site-inner-width) !important;
+        min-width: var(--site-inner-width) !important;
+        max-width: var(--site-inner-width) !important;
+        box-sizing: border-box !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+    }
+    [data-testid="stForm"] textarea { min-width: 0 !important; }
+    .kwic-wrapper,
+    .register-card,
+    .corpus-card-grid,
+    .about-text,
+    .citation-box,
+    .site-footer {
+        max-width: var(--site-inner-width) !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+    }
+
+    /* Невелике коригування висоти на телефоні після zoom. */
+    @media (max-width: 760px) {
+        .block-container { margin-bottom: -36rem !important; }
+    }
+    @media (max-width: 520px) {
+        .block-container { margin-bottom: -48rem !important; }
+    }
+    @media (max-width: 390px) {
+        .block-container { margin-bottom: -58rem !important; }
+    }
+
     </style>
     """,
     unsafe_allow_html=True,
