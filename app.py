@@ -2091,12 +2091,80 @@ with about_tab:
         unsafe_allow_html=True,
     )
 
-    st.markdown("### Як цитувати сайт")
+    # =========================
+    # Як цитувати сайт
+    # =========================
+
     st.markdown(
         """
-        <div class='citation-box'>
-        Кривенок В. <strong>БАНДЕРОГРАФІЯ: електронний конкорданс творів-першодруків Степана Бандери</strong>.
-        Київ, 2026. URL: <em>покликання буде додано після публікації сайту</em>.
+        <style>
+        .citation-box {
+            width: min(100%, 980px);
+            box-sizing: border-box;
+            margin: 18px auto 0 auto;
+            padding: 18px 20px;
+            border-radius: 18px;
+            border: 1px solid rgba(143, 101, 42, 0.35);
+            background: rgba(255, 252, 244, 0.92);
+            color: #3b1717;
+            font-size: 18px;
+            line-height: 1.65;
+            text-align: center;
+            box-shadow: 0 10px 28px rgba(44, 0, 0, 0.12);
+        }
+
+        .citation-box strong {
+            font-weight: 850;
+        }
+
+        .citation-label {
+            font-weight: 850;
+            color: #6f0f17;
+        }
+
+        .citation-url-label {
+            font-weight: 750;
+        }
+
+        .citation-box a,
+        .citation-box a:visited {
+            color: #6f0f17 !important;
+            font-weight: 850;
+            text-decoration: underline;
+            text-underline-offset: 3px;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
+        .citation-box a:hover {
+            text-decoration-thickness: 2px;
+        }
+
+        @media (max-width: 768px) {
+            .citation-box {
+                width: 94%;
+                margin: 14px auto 0 auto;
+                padding: 15px 14px;
+                font-size: 15.5px;
+                line-height: 1.55;
+                border-radius: 15px;
+            }
+        }
+        </style>
+
+        <div class="citation-box">
+            <span class="citation-label">Як цитувати сайт:</span>
+            Кривенок В.
+            <strong>БАНДЕРОГРАФІЯ: електронний конкорданс творів-першодруків Степана Бандери</strong>.
+            Київ, 2026.
+            <br>
+            <span class="citation-url-label">URL:</span>
+            <a class="citation-link"
+               href="https://banderografia.streamlit.app/"
+               target="_blank"
+               rel="noopener noreferrer">
+               https://banderografia.streamlit.app/
+            </a>.
         </div>
         """,
         unsafe_allow_html=True,
