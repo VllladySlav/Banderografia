@@ -262,6 +262,30 @@ def parse_queries(text: str) -> list[str]:
     return result
 
 
+def format_search_option(wordform: str) -> str:
+    """Підписує порожній пункт випадного списку як підказку."""
+    return "Почни вводити словоформу..." if not wordform else str(wordform)
+
+
+def random_corpus_wordforms(wordforms_df: pd.DataFrame, n: int = 10) -> list[str]:
+    """Добирає короткий рядок випадкових словоформ із корпусу для швидкого пошуку."""
+    if wordforms_df.empty or "wordform" not in wordforms_df.columns:
+        return []
+    forms = wordforms_df.copy()
+    forms["wordform"] = forms["wordform"].astype(str)
+    mask = (
+        forms["wordform"].str.fullmatch(r"[А-Яа-яІіЇїЄєҐґ'’\-]{4,18}", na=False)
+        & forms["frequency"].fillna(0).astype(int).ge(3)
+    )
+    pool = forms.loc[mask, ["wordform", "frequency"]]
+    if pool.empty:
+        pool = forms[["wordform", "frequency"]]
+    sample_size = min(int(n), len(pool))
+    if sample_size <= 0:
+        return []
+    return pool.sample(sample_size)["wordform"].astype(str).tolist()
+
+
 def get_wordforms_for_queries(queries: list[str], use_variants: bool, wordforms_df: pd.DataFrame) -> list[str]:
     if wordforms_df.empty:
         return []
@@ -1486,7 +1510,7 @@ st.markdown(
     /* Вкладки */
     div[data-baseweb="tab-list"] {
         gap: 0.34rem;
-        border-bottom: 2px solid rgba(235, 198, 111, 0.72);
+        border-bottom: none !important;
         margin-top: 0.15rem;
         position: sticky;
         top: 0;
@@ -1496,6 +1520,11 @@ st.markdown(
         box-shadow: 0 14px 28px rgba(0,0,0,0.11);
         backdrop-filter: none;
         overflow: visible;
+        justify-content: center !important;
+    }
+    div[data-baseweb="tab-highlight"],
+    div[data-baseweb="tab-border"] {
+        display: none !important;
     }
     button[role="tab"] {
         padding: 0.98rem 1.9rem 0.92rem 1.9rem !important;
@@ -1582,12 +1611,13 @@ st.markdown(
     button[role="tab"]:nth-of-type(2) p { --tab-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.1' stroke-linecap='round'%3E%3Cpath d='M5 20V10M12 20V4M19 20v-7'/%3E%3C/svg%3E"); }
     button[role="tab"]:nth-of-type(3) p { --tab-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.0' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6.5c2.6-1.2 5.3-1.2 8 0v13c-2.7-1.2-5.4-1.2-8 0zM12 6.5c2.7-1.2 5.4-1.2 8 0v13c-2.6-1.2-5.3-1.2-8 0z'/%3E%3C/svg%3E"); }
     button[role="tab"]:nth-of-type(4) p { --tab-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.0' stroke-linecap='round'%3E%3Cpath d='M8 6h12M8 12h12M8 18h12'/%3E%3Cpath d='M4 6h.01M4 12h.01M4 18h.01'/%3E%3C/svg%3E"); }
-    button[role="tab"]:nth-of-type(5) p { --tab-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.0' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 7h10M17 7l-3-3M17 7l-3 3M17 17H7M7 17l3-3M7 17l3 3'/%3E%3C/svg%3E"); }
+    button[role="tab"]:nth-of-type(5) p { --tab-icon: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%2024%2024%27%20fill%3D%27none%27%20stroke%3D%27black%27%20stroke-width%3D%272.0%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M5%204.5h10.5A2.5%202.5%200%200%201%2018%207v13H7.5A2.5%202.5%200%200%201%205%2017.5z%27%2F%3E%3Cpath%20d%3D%27M8%204.5v13A2.5%202.5%200%200%200%2010.5%2020%27%2F%3E%3Cpath%20d%3D%27M9%208h5M9%2011.5h5%27%2F%3E%3Cpath%20d%3D%27M16%204.5v6l-2-1.2-2%201.2v-6%27%2F%3E%3C%2Fsvg%3E"); }
     button[role="tab"]:nth-of-type(6) p { --tab-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.0' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 7h10M17 7l-3-3M17 7l-3 3M17 17H7M7 17l3-3M7 17l3 3'/%3E%3C/svg%3E"); }
     button[role="tab"]:nth-of-type(7) p { --tab-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.0' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 10v6M12 7h.01'/%3E%3C/svg%3E"); }
 
     /* Головна пошукова зона */
-    [data-testid="stForm"] {
+    [data-testid="stForm"],
+    .st-key-search_panel {
         background: linear-gradient(180deg, rgba(255,254,250,0.998), rgba(255,249,240,0.994));
         border: 2px solid rgba(176, 112, 44, 0.58);
         border-radius: 22px;
@@ -1598,7 +1628,8 @@ st.markdown(
             0 0 0 4px rgba(120,5,31,0.20);
         margin-top: 1.15rem;
     }
-    [data-testid="stForm"] label p {
+    [data-testid="stForm"] label p,
+    .st-key-search_panel label p {
         font-size: 18.5px;
         font-weight: 850;
         color: #2a1e25;
@@ -1669,7 +1700,14 @@ st.markdown(
     [data-testid="stForm"] [data-testid="stCheckbox"] *,
     [data-testid="stForm"] [data-testid="stNumberInput"] label p,
     [data-testid="stForm"] [data-testid="stTextArea"] label p,
-    [data-testid="stForm"] [data-testid="stSelectbox"] label p {
+    [data-testid="stForm"] [data-testid="stSelectbox"] label p,
+    .st-key-search_panel [data-testid="stExpander"] label p,
+    .st-key-search_panel [data-testid="stExpander"] p,
+    .st-key-search_panel [data-testid="stRadio"] [role="radiogroup"] *,
+    .st-key-search_panel [data-testid="stCheckbox"] *,
+    .st-key-search_panel [data-testid="stNumberInput"] label p,
+    .st-key-search_panel [data-testid="stTextArea"] label p,
+    .st-key-search_panel [data-testid="stSelectbox"] label p {
         color: #24171f !important;
     }
     .advanced-note {
@@ -1677,6 +1715,60 @@ st.markdown(
         font-size: 15px;
         line-height: 1.45;
         margin-top: -0.2rem;
+    }
+    .random-word-heading {
+        margin: 0.9rem auto 0.45rem auto;
+        text-align: center;
+        font-size: 17px;
+        font-weight: 850;
+        color: rgba(255,248,236,0.96) !important;
+        letter-spacing: 0.01em;
+    }
+    .random-word-heading span {
+        color: rgba(241,198,90,0.98) !important;
+    }
+    .st-key-random_words_strip [data-testid="stHorizontalBlock"] {
+        justify-content: center !important;
+        gap: 0.72rem !important;
+        flex-wrap: wrap !important;
+    }
+    .st-key-random_words_strip [data-testid="column"] {
+        width: auto !important;
+        flex: 0 0 auto !important;
+        min-width: fit-content !important;
+    }
+    .st-key-random_words_strip [data-testid="stButton"] > button,
+    .st-key-random_words_strip div.stButton > button {
+        min-height: auto !important;
+        padding: 0.05rem 0.18rem !important;
+        background: transparent !important;
+        background-image: none !important;
+        border: none !important;
+        box-shadow: none !important;
+        border-radius: 0 !important;
+        color: #f0c45f !important;
+        font-size: 17px !important;
+        font-weight: 850 !important;
+        line-height: 1.2 !important;
+        text-shadow: 0 0 7px rgba(240,196,95,0.16);
+        transform: none !important;
+    }
+    .st-key-random_words_strip [data-testid="stButton"] > button:hover,
+    .st-key-random_words_strip div.stButton > button:hover {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        color: #ffe08a !important;
+        text-shadow:
+            0 0 7px rgba(255,224,138,0.95),
+            0 0 16px rgba(240,196,95,0.70),
+            0 0 28px rgba(120,5,31,0.38);
+        transform: none !important;
+    }
+    .st-key-random_words_strip [data-testid="stButton"] > button:focus,
+    .st-key-random_words_strip div.stButton > button:focus {
+        outline: none !important;
+        box-shadow: none !important;
     }
 
     [data-baseweb="checkbox"] [aria-checked="true"],
@@ -1712,7 +1804,13 @@ st.markdown(
     [data-testid="stForm"] div[data-testid="stNumberInput"] > label p,
     [data-testid="stForm"] div[data-testid="stSelectbox"] > label p,
     [data-testid="stForm"] div[data-testid="stMultiSelect"] > label p,
-    [data-testid="stForm"] div[data-testid="stCheckbox"] * {
+    [data-testid="stForm"] div[data-testid="stCheckbox"] *,
+    .st-key-search_panel div[data-testid="stRadio"] [role="radiogroup"] *,
+    .st-key-search_panel div[data-testid="stTextInput"] > label p,
+    .st-key-search_panel div[data-testid="stNumberInput"] > label p,
+    .st-key-search_panel div[data-testid="stSelectbox"] > label p,
+    .st-key-search_panel div[data-testid="stMultiSelect"] > label p,
+    .st-key-search_panel div[data-testid="stCheckbox"] * {
         color: #24171f !important;
     }
     [data-baseweb="select"] div[role="button"] { background: rgba(255,255,255,0.96) !important; }
@@ -1731,7 +1829,13 @@ st.markdown(
     [data-testid="stForm"] div[data-testid="stCheckbox"] p,
     [data-testid="stForm"] div[data-testid="stCheckbox"] span,
     [data-testid="stForm"] div[data-testid="stRadio"] label p,
-    [data-testid="stForm"] div[data-testid="stRadio"] label span {
+    [data-testid="stForm"] div[data-testid="stRadio"] label span,
+    .st-key-search_panel div[data-testid="stCheckbox"] label p,
+    .st-key-search_panel div[data-testid="stCheckbox"] label span,
+    .st-key-search_panel div[data-testid="stCheckbox"] p,
+    .st-key-search_panel div[data-testid="stCheckbox"] span,
+    .st-key-search_panel div[data-testid="stRadio"] label p,
+    .st-key-search_panel div[data-testid="stRadio"] label span {
         color: #24171f !important;
     }
 
@@ -1773,7 +1877,11 @@ st.markdown(
     [data-testid="stForm"] div[data-testid="stCheckbox"] label,
     [data-testid="stForm"] div[data-testid="stCheckbox"] label *,
     [data-testid="stForm"] div[data-testid="stCheckbox"] p,
-    [data-testid="stForm"] div[data-testid="stCheckbox"] span {
+    [data-testid="stForm"] div[data-testid="stCheckbox"] span,
+    .st-key-search_panel div[data-testid="stCheckbox"] label,
+    .st-key-search_panel div[data-testid="stCheckbox"] label *,
+    .st-key-search_panel div[data-testid="stCheckbox"] p,
+    .st-key-search_panel div[data-testid="stCheckbox"] span {
         color: #24171f !important;
     }
 
@@ -2064,7 +2172,7 @@ st.markdown(
             overflow: visible !important;
             margin: 0.18rem auto 0.92rem auto !important;
             padding: 0 0 0.42rem 0 !important;
-            border-bottom: 1.5px solid rgba(235, 198, 111, 0.55) !important;
+            border-bottom: none !important;
             box-sizing: border-box !important;
         }
         button[role="tab"] {
@@ -2294,17 +2402,23 @@ search_tab, freq_tab, corpus_tab, articles_tab, dictionary_tab, variants_tab, ab
 ])
 
 with search_tab:
-    with st.form("search_form"):
+    wordform_options = [""] + wordforms_df["wordform"].astype(str).tolist()
+    try:
+        search_panel = st.container(key="search_panel")
+    except TypeError:
+        search_panel = st.container()
+    with search_panel:
         main_col, button_col = st.columns([5.45, 1.18], vertical_alignment="bottom")
         with main_col:
-            query_text = st.text_area(
-                "Словоформа / словоформи для пошуку",
-                placeholder="Наприклад: України, революції, ОУН",
-                height=62,
-                help="Введи одну або кілька словоформ і натисни кнопку «Пошук». Можна розділяти словоформи комами, крапками з комою або новими рядками.",
+            query_text = st.selectbox(
+                "Словоформа для пошуку",
+                options=wordform_options,
+                index=0,
+                format_func=format_search_option,
+                help="Почни вводити словоформу — нижче з’явиться випадний список підказок із корпусу.",
             )
         with button_col:
-            search_clicked = st.form_submit_button("Пошук", type="primary")
+            search_clicked = st.button("Пошук", type="primary", key="search_submit_button")
 
         with st.expander("Розширені налаштування", expanded=True):
             col1, col2, col3, col4 = st.columns([1.55, 1.05, 1.05, 1.35])
@@ -2313,17 +2427,21 @@ with search_tab:
                     "Режим контексту",
                     ["Реченнєвий контекст", "Контекст фіксованої глибини"],
                     index=0,
+                    key="search_context_mode",
                 )
             with col2:
-                depth = st.number_input("Глибина", min_value=1, max_value=50, value=7, step=1)
+                if mode == "Контекст фіксованої глибини":
+                    depth = st.number_input("Глибина", min_value=1, max_value=50, value=7, step=1, key="search_context_depth")
+                else:
+                    depth = 7
             with col3:
-                max_rows = st.number_input("Показати прикладів", min_value=20, max_value=1000, value=150, step=20)
+                max_rows = st.number_input("Показати прикладів", min_value=20, max_value=1000, value=150, step=20, key="search_max_rows")
             with col4:
-                variants_choice = st.selectbox("Об’єднувати варіянти", ["Так", "Ні"], index=0)
+                variants_choice = st.selectbox("Об’єднувати варіянти", ["Так", "Ні"], index=0, key="search_variants_choice")
                 use_variants = variants_choice == "Так"
-                st.markdown("<div class='advanced-note'>Для варіянтних слів зберігається оригінальне написання в контексті.</div>", unsafe_allow_html=True)
 
     if search_clicked:
+        st.session_state["selected_codes_current"] = []
         st.session_state["last_search"] = {
             "queries": parse_queries(query_text),
             "mode": mode,
@@ -2332,6 +2450,38 @@ with search_tab:
             "max_rows": int(max_rows),
             "selected_codes": [],
         }
+
+    if (
+        st.session_state.get("random_corpus_words_stamp") != STAMP
+        or not st.session_state.get("random_corpus_words")
+    ):
+        st.session_state["random_corpus_words"] = random_corpus_wordforms(wordforms_df, n=10)
+        st.session_state["random_corpus_words_stamp"] = STAMP
+
+    random_words = st.session_state.get("random_corpus_words", [])
+    if random_words:
+        st.markdown(
+            "<div class='random-word-heading'>Випадкові слова з корпусу Степана Бандери:</div>",
+            unsafe_allow_html=True,
+        )
+        try:
+            random_words_container = st.container(key="random_words_strip")
+        except TypeError:
+            random_words_container = st.container()
+        with random_words_container:
+            random_cols = st.columns(len(random_words))
+            for idx, word in enumerate(random_words):
+                with random_cols[idx]:
+                    if st.button(word, key=f"random_corpus_word_{idx}_{word}"):
+                        st.session_state["selected_codes_current"] = []
+                        st.session_state["last_search"] = {
+                            "queries": [normalize_wordform(word)],
+                            "mode": mode,
+                            "depth": int(depth),
+                            "use_variants": bool(use_variants),
+                            "max_rows": int(max_rows),
+                            "selected_codes": [],
+                        }
 
     search_state = st.session_state.get("last_search")
 
