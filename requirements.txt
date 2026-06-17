@@ -2,9 +2,3 @@ streamlit>=1.36
 pandas>=2.0
 python-docx>=1.1.2
 openpyxl>=3.1.0
-sqlalchemy>=2.0.0
-<<<<<<< HEAD
-psycopg2-binary>=2.9.6
-=======
-psycopg2-binary>=2.9.6
->>>>>>> fb4e09b4eade306ab24b12244009b14d0c5b733d
