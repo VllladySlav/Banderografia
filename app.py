@@ -7,10 +7,13 @@ import base64
 import html
 import io
 import json
+import random
 import re
+import smtplib
 import sqlite3
 import zipfile
 from pathlib import Path
+from email.message import EmailMessage
 from typing import Iterable
 
 import pandas as pd
@@ -35,6 +38,56 @@ PORTRAIT_CANDIDATES = [
 ]
 EMPTY_CONTEXT = "------"
 EXCLUDED_VARIANT_GROUPS_PATH = OUTPUTS_DIR / "excluded_variant_groups.json"
+
+DEFAULT_ADMIN_NAME = "Владислав Кривенок"
+DEFAULT_ADMIN_EMAIL = "kryvenokvladyslav@gmail.com"
+
+
+def app_secret_value(name: str, default: str = "") -> str:
+    """Безпечно читає значення зі Streamlit Secrets або змінних середовища."""
+    try:
+        if name in st.secrets:
+            return str(st.secrets[name]).strip()
+        if "email" in st.secrets and isinstance(st.secrets["email"], dict):
+            section = st.secrets["email"]
+            for key in (name, name.lower(), name.upper()):
+                if key in section:
+                    return str(section[key]).strip()
+    except Exception:
+        pass
+    import os
+    return str(os.environ.get(name, default) or default).strip()
+
+
+def notify_admin_about_access_request(name: str, email: str) -> bool:
+    """Надсилає адміністраторові email про новий запит, якщо налаштовано SMTP-secrets."""
+    smtp_host = app_secret_value("SMTP_HOST")
+    smtp_user = app_secret_value("SMTP_USERNAME")
+    smtp_password = app_secret_value("SMTP_PASSWORD")
+    smtp_from = app_secret_value("SMTP_FROM", smtp_user or DEFAULT_ADMIN_EMAIL)
+    admin_email = app_secret_value("ADMIN_EMAIL", DEFAULT_ADMIN_EMAIL)
+    if not smtp_host or not smtp_user or not smtp_password or not admin_email:
+        return False
+    try:
+        smtp_port = int(app_secret_value("SMTP_PORT", "587") or "587")
+        msg = EmailMessage()
+        msg["Subject"] = "Бандерографія: новий запит на доступ до словника"
+        msg["From"] = smtp_from
+        msg["To"] = admin_email
+        msg.set_content(
+            "Новий користувач просить доступ до редагування словника.\n\n"
+            f"Ім’я: {name}\n"
+            f"Пошта: {email}\n\n"
+            "Щоб надати або відхилити доступ, відкрийте вкладку «Словник» → «Редагувати» "
+            "і скористайтеся адмін-панеллю керування доступом."
+        )
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=12) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.send_message(msg)
+        return True
+    except Exception:
+        return False
 
 
 CONCORDANCE_COLUMNS_UA = {
@@ -593,10 +646,7 @@ PORTRAIT_DATA_URI = image_data_uri(resolve_portrait_path())
 # =========================
 
 ADD_SENTINEL_PREFIX = "➕ Додати нове значення до списку"
-
-# Streamlit дозволяє відкрити лише одне модальне вікно st.dialog за один прохід скрипта.
-# Якщо в кількох multiselect/selectbox одночасно лишився пункт «Додати нове значення...»,
-# без цього запобіжника застосунок падає з StreamlitAPIException.
+VOWELS_UA = set("аеєиіїоуюяАЕЄИІЇОУЮЯ")
 _DICT_OPTION_DIALOG_OPENED_THIS_RUN = False
 
 
@@ -604,31 +654,213 @@ def _split_saved_options(raw: str) -> list[str]:
     return [p.strip() for p in str(raw or "").split(";") if p.strip()]
 
 
+def safe_int(value, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except Exception:
+        return default
+
+
+def keyed_container(key: str):
+    try:
+        return st.container(key=key)
+    except TypeError:
+        return st.container()
+
+
+# Легка оптимізація вкладки «Словник» без зміни її функціоналу чи дизайну.
+# Streamlit щоразу перезапускає скрипт після дії користувача, тому повторні
+# читання незмінних довідників і службових списків кешуємо в межах поточної сесії.
+def dictionary_cache_version() -> int:
+    return int(st.session_state.get("_dictionary_cache_version", 0) or 0)
+
+
+def invalidate_dictionary_caches() -> None:
+    st.session_state["_dictionary_cache_version"] = dictionary_cache_version() + 1
+
+
+def fast_rerun() -> None:
+    """Перезапуск сторінки після зміни даних із точковим скиданням кешу словника."""
+    invalidate_dictionary_caches()
+    st.rerun()
+
+
+def ensure_dictionary_db_ready() -> None:
+    """Ініціалізує словникову БД один раз за сесію замість кожного кліку."""
+    if st.session_state.get("_dictionary_db_ready"):
+        return
+    lexdb.init_lex_db()
+    lexdb.ensure_default_admin_user()
+    st.session_state["_dictionary_db_ready"] = True
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_lexdb_get_options(field_name: str, cache_version: int) -> list[str]:
+    return lexdb.get_options(field_name)
+
+
+def cached_lexdb_get_options(field_name: str) -> list[str]:
+    return _cached_lexdb_get_options(field_name, dictionary_cache_version())
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_lexdb_get_grammar_options(pos: str, cache_version: int) -> list[str]:
+    return lexdb.get_grammar_options(pos)
+
+
+def cached_lexdb_get_grammar_options(pos: str) -> list[str]:
+    return _cached_lexdb_get_grammar_options(pos, dictionary_cache_version())
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_lexdb_list_references(table: str, limit: int, cache_version: int) -> list[dict]:
+    return lexdb.list_references(table, limit=limit)
+
+
+def cached_lexdb_list_references(table: str, limit: int = 10000) -> list[dict]:
+    return _cached_lexdb_list_references(table, int(limit), dictionary_cache_version())
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_lexdb_search_words(query: str, limit: int, cache_version: int) -> list[dict]:
+    return lexdb.search_words(query, limit=limit)
+
+
+def cached_lexdb_search_words(query: str = "", limit: int = 200) -> list[dict]:
+    return _cached_lexdb_search_words(str(query or ""), int(limit), dictionary_cache_version())
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_lexdb_get_dictionary_article_full(word_id: int, cache_version: int) -> dict:
+    return lexdb.get_dictionary_article_full(int(word_id))
+
+
+def cached_lexdb_get_dictionary_article_full(word_id: int) -> dict:
+    return _cached_lexdb_get_dictionary_article_full(int(word_id), dictionary_cache_version())
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_lexdb_list_users(cache_version: int) -> list[dict]:
+    return lexdb.list_users()
+
+
+def cached_lexdb_list_users() -> list[dict]:
+    return _cached_lexdb_list_users(dictionary_cache_version())
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_lexdb_list_definitions(word_id: int, cache_version: int) -> list[dict]:
+    return lexdb.list_definitions(int(word_id))
+
+
+def cached_lexdb_list_definitions(word_id: int) -> list[dict]:
+    return _cached_lexdb_list_definitions(int(word_id), dictionary_cache_version())
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_lexdb_list_collocations(word_id: int, cache_version: int) -> list[dict]:
+    return lexdb.list_collocations(int(word_id))
+
+
+def cached_lexdb_list_collocations(word_id: int) -> list[dict]:
+    return _cached_lexdb_list_collocations(int(word_id), dictionary_cache_version())
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_lexdb_list_wordforms_for_word(word_id: int, cache_version: int) -> list[dict]:
+    return lexdb.list_wordforms_for_word(int(word_id))
+
+
+def cached_lexdb_list_wordforms_for_word(word_id: int) -> list[dict]:
+    return _cached_lexdb_list_wordforms_for_word(int(word_id), dictionary_cache_version())
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_lexdb_list_variants(word_id: int, cache_version: int) -> list[dict]:
+    return lexdb.list_variants(int(word_id))
+
+
+def cached_lexdb_list_variants(word_id: int) -> list[dict]:
+    return _cached_lexdb_list_variants(int(word_id), dictionary_cache_version())
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_lexdb_list_variant_wordforms(variant_id: int, cache_version: int) -> list[dict]:
+    return lexdb.list_variant_wordforms(int(variant_id))
+
+
+def cached_lexdb_list_variant_wordforms(variant_id: int) -> list[dict]:
+    return _cached_lexdb_list_variant_wordforms(int(variant_id), dictionary_cache_version())
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_lexdb_list_crossrefs(word_id: int, cache_version: int) -> list[dict]:
+    return lexdb.list_crossrefs(int(word_id))
+
+
+def cached_lexdb_list_crossrefs(word_id: int) -> list[dict]:
+    return _cached_lexdb_list_crossrefs(int(word_id), dictionary_cache_version())
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_lexdb_list_semantic_relations(word_id: int, cache_version: int) -> list[dict]:
+    return lexdb.list_semantic_relations(int(word_id))
+
+
+def cached_lexdb_list_semantic_relations(word_id: int) -> list[dict]:
+    return _cached_lexdb_list_semantic_relations(int(word_id), dictionary_cache_version())
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_lexdb_list_subdefinitions(definition_id: int, cache_version: int) -> list[dict]:
+    return lexdb.list_subdefinitions(int(definition_id))
+
+
+def cached_lexdb_list_subdefinitions(definition_id: int) -> list[dict]:
+    return _cached_lexdb_list_subdefinitions(int(definition_id), dictionary_cache_version())
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_lexdb_get_wordform(word_id: int, wordform: str, cache_version: int) -> dict | None:
+    return lexdb.get_wordform(int(word_id), str(wordform or ""))
+
+
+def cached_lexdb_get_wordform(word_id: int, wordform: str) -> dict | None:
+    return _cached_lexdb_get_wordform(int(word_id), str(wordform or ""), dictionary_cache_version())
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_lexdb_get_quote_attachments(quote_id: int, cache_version: int) -> list[dict]:
+    return lexdb.get_quote_attachments(int(quote_id))
+
+
+def cached_lexdb_get_quote_attachments(quote_id: int) -> list[dict]:
+    return _cached_lexdb_get_quote_attachments(int(quote_id), dictionary_cache_version())
+
+
 def _open_add_option_dialog(field_name: str, label: str, key_prefix: str) -> None:
+    # Streamlit дозволяє відкрити лише один st.dialog за один прохід скрипта.
+    # Якщо sentinel «Додати нове значення...» випадково лишився вибраним у кількох
+    # multiselect/selectbox, відкриваємо тільки перше вікно, щоб сторінка не падала.
     global _DICT_OPTION_DIALOG_OPENED_THIS_RUN
+    if _DICT_OPTION_DIALOG_OPENED_THIS_RUN:
+        return
+    _DICT_OPTION_DIALOG_OPENED_THIS_RUN = True
 
     title = f"Додати нове значення до списку «{label}»"
-
-    def save_new_option(new_value: str) -> None:
-        if not new_value.strip():
-            st.error("Нове значення не може бути порожнім.")
-            return
-        lexdb.add_option(field_name, new_value)
-        st.success("Значення додано до випадного списку.")
-        st.rerun()
 
     def fallback_form() -> None:
         with st.expander(title, expanded=True):
             new_value = st.text_input("Нове значення", key=f"{key_prefix}_{field_name}_dialog_value_fallback")
             if st.button("Зберегти значення", key=f"{key_prefix}_{field_name}_dialog_save_fallback"):
-                save_new_option(new_value)
-
-    # У межах одного rerun може спрацювати кілька полів із пунктом
-    # «Додати нове значення...». Streamlit дозволяє відкрити тільки один dialog,
-    # тому другі й наступні виклики пропускаємо, щоб сайт не падав.
-    if _DICT_OPTION_DIALOG_OPENED_THIS_RUN:
-        return
-    _DICT_OPTION_DIALOG_OPENED_THIS_RUN = True
+                if not new_value.strip():
+                    st.error("Нове значення не може бути порожнім.")
+                else:
+                    lexdb.add_option(field_name, new_value)
+                    st.success("Значення додано до випадного списку.")
+                    fast_rerun()
 
     if hasattr(st, "dialog"):
         @st.dialog(title)
@@ -636,26 +868,19 @@ def _open_add_option_dialog(field_name: str, label: str, key_prefix: str) -> Non
             st.caption("Після збереження значення з’явиться у відповідному випадному списку.")
             new_value = st.text_input("Нове значення", key=f"{key_prefix}_{field_name}_dialog_value")
             if st.button("Зберегти значення", type="primary", key=f"{key_prefix}_{field_name}_dialog_save"):
-                save_new_option(new_value)
-
-        try:
-            add_dialog()
-        except Exception:
-            # Якщо Streamlit уже має відкрите модальне вікно, не ламаємо всю сторінку,
-            # а показуємо запасну форму в тому самому місці інтерфейсу.
-            fallback_form()
+                if not new_value.strip():
+                    st.error("Нове значення не може бути порожнім.")
+                else:
+                    lexdb.add_option(field_name, new_value)
+                    st.success("Значення додано до випадного списку.")
+                    fast_rerun()
+        add_dialog()
     else:
         fallback_form()
 
 
 def dictionary_option_select(label: str, field_name: str, default_value: str = "", key_prefix: str = "") -> str:
-    """Однозначний випадний список із пунктом додавання нового значення внизу.
-
-    Важливо: якщо довідник ще порожній, список НЕ має автоматично відкривати
-    вікно додавання. Тому першим пунктом завжди є нейтральне «— не вибрано —»,
-    а пункт додавання стоїть унизу списку й спрацьовує лише після ручного вибору.
-    """
-    options = lexdb.get_options(field_name)
+    options = cached_lexdb_get_options(field_name)
     shown_base = list(options)
     if default_value and default_value not in shown_base:
         shown_base.append(default_value)
@@ -675,8 +900,7 @@ def dictionary_option_select(label: str, field_name: str, default_value: str = "
 
 
 def dictionary_option_multiselect(label: str, field_name: str, default_raw: str = "", key_prefix: str = "", options_override: list[str] | None = None) -> str:
-    """Багатозначний випадний список із пунктом додавання нового значення внизу."""
-    options = list(options_override if options_override is not None else lexdb.get_options(field_name))
+    options = list(options_override if options_override is not None else cached_lexdb_get_options(field_name))
     defaults_raw = _split_saved_options(default_raw)
     shown_base = list(options)
     for value in defaults_raw:
@@ -693,16 +917,13 @@ def dictionary_option_multiselect(label: str, field_name: str, default_raw: str 
 
 
 def grammar_multiselect_for_pos(label: str, pos: str, default_raw: str = "", key_prefix: str = "") -> str:
-    """Граматичні ознаки, залежні від частини мови."""
     grammar_field = lexdb.grammar_field_name(pos)
-    options = lexdb.get_grammar_options(pos)
-    # Нові граматичні значення зберігаємо саме в частиномовний підсписок.
+    options = cached_lexdb_get_grammar_options(pos)
     return dictionary_option_multiselect(label, grammar_field, default_raw, key_prefix=key_prefix, options_override=options)
 
 
 def render_dictionary_auth() -> dict | None:
-    """Авторизація для редакторського режиму вкладки «Словник»."""
-    lexdb.init_lex_db()
+    ensure_dictionary_db_ready()
 
     if "dictionary_user" in st.session_state:
         user = st.session_state["dictionary_user"]
@@ -712,30 +933,12 @@ def render_dictionary_auth() -> dict | None:
         with top2:
             if st.button("Вийти", key="dict_logout"):
                 st.session_state.pop("dictionary_user", None)
-                st.rerun()
+                fast_rerun()
         if not int(user.get("CAN_EDIT", 0)):
             st.warning("Ваш обліковий запис створено, але право редагування словника ще не надано адміністратором.")
             return None
         return user
 
-    if lexdb.user_count() == 0:
-        st.warning("Перший запуск словникової бази: створіть адміністратора вкладки «Словник».")
-        with st.form("create_first_admin"):
-            name = st.text_input("Ім’я", value="Владислав Кривенок")
-            email = st.text_input("Пошта")
-            password = st.text_input("Пароль", type="password")
-            password2 = st.text_input("Повторіть пароль", type="password")
-            submitted = st.form_submit_button("Створити адміністратора", type="primary")
-        if submitted:
-            if not name.strip() or not email.strip() or not password:
-                st.error("Заповніть ім’я, пошту й пароль.")
-            elif password != password2:
-                st.error("Паролі не збігаються.")
-            else:
-                lexdb.create_user(name, email, password, role="admin", can_edit=True)
-                st.success("Адміністратора створено. Тепер увійдіть у систему.")
-                st.rerun()
-        return None
 
     login_tab, register_tab = st.tabs(["Вхід", "Запит на доступ"])
     with login_tab:
@@ -749,7 +952,7 @@ def render_dictionary_auth() -> dict | None:
                 st.error("Неправильна пошта або пароль.")
             else:
                 st.session_state["dictionary_user"] = user
-                st.rerun()
+                fast_rerun()
     with register_tab:
         st.caption("Після реєстрації адміністратор має надати право редагування.")
         with st.form("dictionary_register_form"):
@@ -760,7 +963,12 @@ def render_dictionary_auth() -> dict | None:
         if submitted:
             try:
                 lexdb.create_user(name, email, password, role="viewer", can_edit=False)
-                st.success("Запит створено. Дочекайтеся дозволу адміністратора.")
+                notified = notify_admin_about_access_request(name, email)
+                if notified:
+                    st.success("Запит створено. Адміністраторові надіслано сповіщення на пошту.")
+                else:
+                    st.success("Запит створено. Дочекайтеся дозволу адміністратора.")
+                    st.caption("Щоб сайт надсилав email-сповіщення автоматично, потрібно додати SMTP-параметри в Streamlit Secrets.")
             except Exception as exc:
                 st.error(f"Не вдалося створити обліковий запис: {exc}")
     return None
@@ -770,7 +978,7 @@ def render_dictionary_admin_panel(current_user: dict) -> None:
     if current_user.get("ROLE") != "admin":
         return
     with st.expander("Керування доступом до редагування словника", expanded=False):
-        users = lexdb.list_users()
+        users = cached_lexdb_list_users()
         if not users:
             st.info("Користувачів ще немає.")
             return
@@ -784,13 +992,90 @@ def render_dictionary_admin_panel(current_user: dict) -> None:
         selected_user = next(u for u in users if u["ID"] == selected_id)
         role = st.selectbox("Роль", options=["viewer", "editor", "admin"], index=["viewer", "editor", "admin"].index(selected_user["ROLE"]), key="admin_role_select")
         can_edit = st.checkbox("Дозволити редагування словника", value=bool(selected_user["CAN_EDIT"]), key="admin_can_edit")
-        if st.button("Зберегти права", key="admin_save_permissions"):
-            lexdb.set_user_permission(int(selected_id), role, can_edit)
-            if st.session_state.get("dictionary_user", {}).get("ID") == selected_id:
-                st.session_state["dictionary_user"]["ROLE"] = role
-                st.session_state["dictionary_user"]["CAN_EDIT"] = int(can_edit)
-            st.success("Права оновлено.")
-            st.rerun()
+        action_col1, action_col2, action_col3 = st.columns([1, 1, 1])
+        with action_col1:
+            if st.button("Зберегти права", key="admin_save_permissions"):
+                lexdb.set_user_permission(int(selected_id), role, can_edit)
+                if st.session_state.get("dictionary_user", {}).get("ID") == selected_id:
+                    st.session_state["dictionary_user"]["ROLE"] = role
+                    st.session_state["dictionary_user"]["CAN_EDIT"] = int(can_edit)
+                st.success("Права оновлено.")
+                fast_rerun()
+        with action_col2:
+            if st.button("Надати доступ", key="admin_approve_access"):
+                lexdb.set_user_permission(int(selected_id), "editor", True)
+                st.success("Доступ надано.")
+                fast_rerun()
+        with action_col3:
+            if selected_user.get("EMAIL") != DEFAULT_ADMIN_EMAIL and st.button("Відхилити запит", key="admin_reject_access"):
+                lexdb.delete_user(int(selected_id))
+                st.warning("Запит відхилено, користувача вилучено.")
+                fast_rerun()
+
+
+def render_dictionary_options_admin_panel(current_user: dict) -> None:
+    """Адмінське керування випадними списками вкладки «Словник»."""
+    if current_user.get("ROLE") != "admin":
+        return
+
+    with st.expander("Керування випадними списками словника", expanded=False):
+        st.caption(
+            "Тут можна вилучити зайві значення з випадних списків. "
+            "Вилучення не змінює вже збережені словникові статті, "
+            "а лише прибирає значення зі списку для майбутнього вибору."
+        )
+
+        field_options = {
+            "Частина мови": "ЧАСТИНА МОВИ",
+            "Граматичні ознаки — загальні": "ГРАМАТИЧНІ ОЗНАКИ",
+            "Граматичні ознаки — іменник": "ГРАМАТИЧНІ ОЗНАКИ::іменник",
+            "Граматичні ознаки — прикметник": "ГРАМАТИЧНІ ОЗНАКИ::прикметник",
+            "Граматичні ознаки — дієслово": "ГРАМАТИЧНІ ОЗНАКИ::дієслово",
+            "Граматичні ознаки — займенник": "ГРАМАТИЧНІ ОЗНАКИ::займенник",
+            "Граматичні ознаки — числівник": "ГРАМАТИЧНІ ОЗНАКИ::числівник",
+            "Граматичні ознаки — прислівник": "ГРАМАТИЧНІ ОЗНАКИ::прислівник",
+            "Стилістичні ремарки": "СТИЛІСТИКА",
+            "Типи сталих сполук": "ТИП СТІЙКОЇ СПОЛУКИ",
+        }
+
+        selected_label = st.selectbox(
+            "Який список редагувати",
+            options=list(field_options.keys()),
+            key="dict_options_admin_field_label",
+        )
+        field_name = field_options[selected_label]
+        values = cached_lexdb_get_options(field_name)
+
+        if not values:
+            st.info("У цьому списку поки немає значень.")
+            return
+
+        value_to_delete = st.selectbox(
+            "Значення, яке треба вилучити зі списку",
+            options=values,
+            key=f"dict_options_admin_delete_value_{field_name}",
+        )
+
+        st.warning(
+            f"Буде вилучено тільки значення «{value_to_delete}» зі списку «{selected_label}». "
+            "У вже збережених статтях це значення не буде стерто."
+        )
+
+        confirm_delete = st.checkbox(
+            "Підтверджую вилучення цього значення зі списку",
+            key=f"dict_options_admin_confirm_{field_name}_{value_to_delete}",
+        )
+
+        if st.button(
+            "Вилучити значення зі списку",
+            key=f"dict_options_admin_delete_button_{field_name}_{value_to_delete}",
+        ):
+            if not confirm_delete:
+                st.error("Спершу поставте підтвердження.")
+            else:
+                lexdb.delete_option(field_name, value_to_delete)
+                st.success(f"Значення «{value_to_delete}» вилучено зі списку.")
+                fast_rerun()
 
 
 def context_row_to_quote(row: pd.Series) -> str:
@@ -801,20 +1086,6 @@ def context_row_to_quote(row: pd.Series) -> str:
     return " ".join(parts).strip()
 
 
-def context_row_to_html(row: pd.Series) -> str:
-    left = str(row.get("left_context", "") or "").strip()
-    key = str(row.get("keyword", "") or "").strip()
-    right = str(row.get("right_context", "") or "").strip()
-    pieces = []
-    if left and left != EMPTY_CONTEXT:
-        pieces.append(html.escape(left))
-    if key:
-        pieces.append(f"<strong>{html.escape(key)}</strong>")
-    if right and right != EMPTY_CONTEXT:
-        pieces.append(html.escape(right))
-    return " ".join(pieces)
-
-
 def highlight_terms(text: str, terms: list[str]) -> str:
     escaped = html.escape(str(text or ""))
     for term in sorted({t for t in terms if t}, key=len, reverse=True):
@@ -823,123 +1094,8 @@ def highlight_terms(text: str, terms: list[str]) -> str:
     return escaped
 
 
-def save_selected_contexts_as_quotes(
-    word_id: int,
-    selected_wordform: str,
-    wordform_frequency: int,
-    selected_contexts: pd.DataFrame,
-    pos: str = "",
-    grammar: str = "",
-) -> list[int]:
-    """Заносить вибрані конкордансні контексти в таблицю ЦИТАТА і зв’язує їх зі словоформою."""
-    quote_ids: list[int] = []
-    wordform_id = lexdb.upsert_wordform(word_id, selected_wordform, int(wordform_frequency or 0), pos=pos, grammar=grammar, stylistics="")
-    for _, row in selected_contexts.iterrows():
-        source_id = lexdb.upsert_reference("ДЖЕРЕЛО", str(row.get("code", "")), str(row.get("article_title", "")))
-        prg = int(row.get("token_index", 0)) if pd.notna(row.get("token_index", None)) else None
-        quote_id = lexdb.upsert_quote(
-            prg=prg,
-            srg=None,
-            firstprint=context_row_to_quote(row),
-            reprint="",
-            source_id=source_id,
-        )
-        lexdb.link_wordform_quote(wordform_id, quote_id)
-        quote_ids.append(quote_id)
-    return quote_ids
-
-
-def render_existing_dictionary_article(word_id: int) -> None:
-    article = lexdb.get_dictionary_article(word_id)
-    word = article.get("word")
-    if not word:
-        return
-    st.markdown("### Попередній перегляд словникової статті")
-    wordforms = article.get("wordforms") or []
-    terms = [str(w.get("СЛОВОФОРМА", "")) for w in wordforms]
-    headword = str(word.get("РЕЄСТРОВА ОДИНИЦЯ", "") or "")
-    if headword:
-        terms.append(headword)
-    st.markdown(
-        f"""
-        <div class='about-text dictionary-preview-card'>
-        <p><strong>{html.escape(headword)}</strong>
-        <span class='dict-muted'> {html.escape(str(word.get('ЧАСТИНА МОВИ', '') or ''))}</span>
-        · частота леми: <strong>{int(word.get('ЧАСТОТА') or 0)}</strong></p>
-        <p><strong>Граматичні ознаки:</strong> {html.escape(str(word.get('ГРАМАТИЧНІ ОЗНАКИ', '') or '—'))}</p>
-        <p><strong>Стилістика:</strong> {html.escape(str(word.get('СТИЛІСТИКА', '') or '—'))}</p>
-        <p><strong>Походження / коментар:</strong> {html.escape(str(word.get('ПОХОДЖЕННЯ', '') or '—'))}</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if wordforms:
-        st.markdown("#### Граматичний довідник словоформ")
-        wfs = pd.DataFrame(wordforms)
-        for col in ["ЧАСТИНА МОВИ", "ГРАМАТИЧНІ ОЗНАКИ"]:
-            if col not in wfs.columns:
-                wfs[col] = ""
-        wfs_view = wfs[["СЛОВОФОРМА", "ЧАСТОТА", "СЛОВО_ID", "ЧАСТИНА МОВИ", "ГРАМАТИЧНІ ОЗНАКИ"]].rename(columns={
-            "СЛОВОФОРМА": "Словоформа",
-            "ЧАСТОТА": "Частота словоформи",
-            "СЛОВО_ID": "ID леми",
-            "ЧАСТИНА МОВИ": "Частина мови словоформи",
-            "ГРАМАТИЧНІ ОЗНАКИ": "Граматичні ознаки словоформи",
-        })
-        wfs_view["Лема"] = headword
-        st.dataframe(wfs_view[["Словоформа", "Лема", "Частота словоформи", "Частина мови словоформи", "Граматичні ознаки словоформи"]], width="stretch", hide_index=True)
-
-    definitions = article.get("definitions") or []
-    if definitions:
-        st.markdown("#### Тлумачення й ілюстрації")
-        for i, d in enumerate(definitions, start=1):
-            st.markdown(
-                f"""
-                <div class='dict-definition-card'>
-                <div class='dict-definition-title'>Значення {i}</div>
-                <div>{html.escape(str(d.get('ТЛУМАЧЕННЯ') or ''))}</div>
-                <div class='dict-card-meta'>Частота в значенні: {int(d.get('ЧАСТОТА') or 0)} · Стилістика: {html.escape(str(d.get('СТИЛІСТИКА') or '—'))}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            qts = lexdb.get_definition_quotes(int(d["ID"]))
-            for q in qts:
-                st.markdown(
-                    f"<div class='dict-quote-card'>{highlight_terms(str(q.get('ПЕРШОДРУК') or ''), terms)} <span class='dict-source'>[{html.escape(str(q.get('ДЖЕРЕЛО_СКОРОЧЕННЯ') or ''))}]</span></div>",
-                    unsafe_allow_html=True,
-                )
-
-    collocations = article.get("collocations") or []
-    if collocations:
-        st.markdown("#### СТАЛІ СПОЛУКИ / ФРАЗЕОЛОГІЗМИ")
-        for c in collocations:
-            st.markdown(
-                f"""
-                <div class='dict-definition-card'>
-                <div class='dict-definition-title'>{html.escape(str(c.get('ОДИНИЦЯ') or ''))}</div>
-                <div class='dict-card-meta'>Тип: {html.escape(str(c.get('ТИП') or '—'))} · Частота: {int(c.get('ЧАСТОТА') or 0)} · Стилістика: {html.escape(str(c.get('СТИЛІСТИКА') or '—'))}</div>
-                <div>{html.escape(str(c.get('ТЛУМАЧЕННЯ') or ''))}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            qts = lexdb.get_collocation_quotes(int(c["ID"]))
-            for q in qts:
-                st.markdown(
-                    f"<div class='dict-quote-card'>{highlight_terms(str(q.get('ПЕРШОДРУК') or ''), terms + [str(c.get('ОДИНИЦЯ') or '')])} <span class='dict-source'>[{html.escape(str(q.get('ДЖЕРЕЛО_СКОРОЧЕННЯ') or ''))}]</span></div>",
-                    unsafe_allow_html=True,
-                )
-
-    quotes = pd.DataFrame(article.get("quotes") or [])
-    if not quotes.empty:
-        with st.expander("Усі цитати, пов’язані зі словоформами цієї леми", expanded=False):
-            st.dataframe(quotes, width="stretch", hide_index=True)
-
-
 def select_wordform_ui(wf_alpha: pd.DataFrame, freq_map: dict, key_suffix: str) -> tuple[str | None, int]:
-    wf_search = st.text_input("Пошук словоформи", placeholder="Наприклад: боротьба", key=f"dict_wf_search_{key_suffix}")
+    wf_search = st.text_input("Пошук словоформи в корпусі", placeholder="Наприклад: боротьба", key=f"dict_wf_search_{key_suffix}")
     wf_view = wf_alpha
     if wf_search:
         q = normalize_wordform(wf_search)
@@ -949,7 +1105,7 @@ def select_wordform_ui(wf_alpha: pd.DataFrame, freq_map: dict, key_suffix: str) 
         return None, 0
     options = wf_view["wordform"].tolist()[:2000]
     selected_wordform = st.selectbox(
-        "Алфавітний список словоформ",
+        "Вибрати словоформу",
         options=options,
         format_func=lambda w: f"{w} ({int(freq_map.get(w, 0))})",
         key=f"dict_wordform_select_{key_suffix}",
@@ -959,10 +1115,9 @@ def select_wordform_ui(wf_alpha: pd.DataFrame, freq_map: dict, key_suffix: str) 
 
 
 def render_context_selector(ctx_df: pd.DataFrame, selected_wordform: str) -> pd.DataFrame:
-    """Показує конкорданс у KWIC-форматі: джерело один раз, далі всі речення з нього."""
     selected_indices: list[int] = []
     st.markdown(
-        "<div class='dict-context-list-title'>Позначте контексти, які треба прикріпити до словоформи, тлумачення або сталої сполуки.</div>",
+        "<div class='dict-context-list-title'>Позначте контексти, які треба внести до ілюстративної зони.</div>",
         unsafe_allow_html=True,
     )
     df = ctx_df.reset_index(drop=True).copy()
@@ -994,302 +1149,1416 @@ def render_context_selector(ctx_df: pd.DataFrame, selected_wordform: str) -> pd.
     return df.iloc[selected_indices].copy() if selected_indices else pd.DataFrame()
 
 
-def render_dictionary_tab(wordforms_df: pd.DataFrame) -> None:
+def dict_zone_header(n: int, title: str, subtitle: str = "") -> None:
     st.markdown(
-        """
-        <style>
-        .dict-light-text, .dict-light-text * { color: rgba(255,248,236,0.98) !important; }
-        .dict-context-list-title { color: rgba(255,248,236,0.96) !important; font-weight: 850; margin: 0.75rem 0 0.5rem 0; }
-        .dict-source-header { margin: 1rem 0 0.45rem 0; padding: 0.52rem 0.78rem; border-left: 5px solid rgba(241,198,90,0.82); border-radius: 9px; background: rgba(255,248,236,0.12); color: rgba(255,248,236,0.98) !important; font-weight: 900; box-shadow: 0 8px 18px rgba(0,0,0,0.08); }
-        .dict-source-header * { color: rgba(255,248,236,0.98) !important; }
-        .dict-kwic-row { display: grid; grid-template-columns: minmax(0, 42%) minmax(126px, 14%) minmax(0, 42%); gap: 9px; align-items: start; background: rgba(255,250,247,0.96); border: 1px solid rgba(176,112,44,0.20); border-radius: 12px; padding: 0.58rem 0.72rem; margin: 0 0 0.45rem 0; box-shadow: 0 7px 16px rgba(0,0,0,0.08); font-family: Georgia, Cambria, 'Times New Roman', serif; font-size: 1.02rem; line-height: 1.43; }
-        .dict-kwic-left { text-align: right; color: #24171f !important; }
-        .dict-kwic-keyword { text-align: center; font-weight: 950; color: #76001f !important; background: rgba(118,0,31,0.075); border-radius: 9px; padding: 0 0.36rem; }
-        .dict-kwic-keyword strong { color: #76001f !important; font-weight: 950; }
-        .dict-kwic-right { text-align: left; color: #24171f !important; }
-        .dict-definition-card { background: rgba(255,250,247,0.94); border-left: 5px solid rgba(118,0,31,0.76); border-radius: 13px; padding: 0.82rem 1rem; margin: 0.65rem 0; color: #24171f !important; }
-        .dict-definition-card * { color: #24171f !important; }
-        .dict-definition-title { color: #76001f !important; font-weight: 950; margin-bottom: 0.35rem; }
-        .dict-card-meta { color: #5f4a53 !important; font-size: 0.92rem; margin: 0.3rem 0; }
-        .dict-quote-card { background: rgba(255,253,248,0.96); border: 1px solid rgba(176,112,44,0.22); border-radius: 12px; padding: 0.62rem 0.82rem; margin: 0.35rem 0 0.35rem 1.1rem; color: #24171f !important; font-family: Georgia, Cambria, 'Times New Roman', serif; line-height: 1.45; }
-        .dict-quote-card strong { color: #76001f !important; font-weight: 950; background: rgba(118,0,31,0.09); padding: 0 0.18rem; border-radius: 0.25rem; }
-        .dict-source { color: #76001f !important; font-weight: 800; }
-        .dict-muted { color: #6f5962 !important; }
-        .dictionary-editor-title, .dictionary-editor-title * { color: rgba(255,248,236,0.98) !important; }
-        /* У темній частині вкладки службові написи мають бути світлими, але у світлих діалогах і панелях — темними. */
-        .dict-origin-label { color: rgba(255,248,236,0.98) !important; font-weight: 850; margin: 0.3rem 0 0.25rem 0; }
-        .dict-compact-toggle button { min-width: 46px !important; width: 46px !important; padding-left: 0 !important; padding-right: 0 !important; }
-        div[role="dialog"] h1, div[role="dialog"] h2, div[role="dialog"] h3,
-        div[role="dialog"] p, div[role="dialog"] span, div[role="dialog"] label p,
-        [data-testid="stDialog"] h1, [data-testid="stDialog"] h2, [data-testid="stDialog"] h3,
-        [data-testid="stDialog"] p, [data-testid="stDialog"] span, [data-testid="stDialog"] label p {
-            color: #24171f !important;
-        }
-        div[role="dialog"] button p, div[role="dialog"] button span,
-        [data-testid="stDialog"] button p, [data-testid="stDialog"] button span {
-            color: #ffffff !important;
-        }
-        [data-testid="stExpander"] div[data-testid="stTextInput"] label p,
-        [data-testid="stExpander"] div[data-testid="stSelectbox"] label p,
-        [data-testid="stExpander"] div[data-testid="stMultiSelect"] label p,
-        [data-testid="stExpander"] div[data-testid="stNumberInput"] label p,
-        [data-testid="stExpander"] div[data-testid="stCheckbox"] label p,
-        [data-testid="stExpander"] div[data-testid="stCaptionContainer"] p {
-            color: #24171f !important;
-        }
-        @media (max-width: 820px) {
-            .dict-kwic-row { grid-template-columns: 1fr !important; }
-            .dict-kwic-left, .dict-kwic-keyword, .dict-kwic-right { text-align: left !important; }
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.subheader("Словник мови Степана Бандери")
-    st.caption("Редакторський режим: створення словникових статей на основі конкордансу та лексикографічної бази даних.")
-    user = render_dictionary_auth()
-    if user is None:
-        return
-    render_dictionary_admin_panel(user)
-
-    st.markdown(
-        """
-        <div class='about-text'>
-        <strong>Редактор словника.</strong> Укладач обирає словоформу з корпусу, зводить її до леми, перевіряє граматичні й стилістичні параметри,
-        добирає ілюстрації з конкордансу, розмежовує значення та за потреби фіксує сталі сполуки / фразеологізми.
+        f"""
+        <div class='dict-zone-heading'>
+            <div class='dict-zone-number'>{n}</div>
+            <div>
+                <h3>{html.escape(title)}</h3>
+                {f"<p>{html.escape(subtitle)}</p>" if subtitle else ""}
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    wf_alpha = wordforms_df[["wordform", "frequency"]].dropna().copy()
-    wf_alpha["wordform"] = wf_alpha["wordform"].astype(str)
-    wf_alpha = wf_alpha.sort_values("wordform", key=lambda s: s.str.casefold())
-    freq_map = dict(zip(wf_alpha["wordform"], wf_alpha["frequency"]))
 
-    left_is_open = st.session_state.get("dict_left_panel_open", True)
-    selected_existing = 0
-    selected_wordform = None
-    selected_frequency = 0
+def reference_select(label: str, table: str, key: str, default_id: int | None = None) -> int | None:
+    refs = cached_lexdb_list_references(table)
+    options = [0] + [int(r["ID"]) for r in refs]
+    labels = {int(r["ID"]): f"{r.get('СКОРОЧЕННЯ') or '—'} — {r.get('ПОВНА НАЗВА') or '—'}" for r in refs}
+    index = options.index(int(default_id)) if default_id and int(default_id) in options else 0
+    selected = st.selectbox(label, options=options, index=index, format_func=lambda x: "— не вибрано —" if x == 0 else labels.get(int(x), str(x)), key=key)
+    return int(selected) if selected else None
 
-    if left_is_open:
-        left_col, right_col = st.columns([1.05, 3.45], gap="large")
-        with left_col:
-            side_title_col, side_btn_col = st.columns([4.4, 0.65], vertical_alignment="center")
-            with side_title_col:
-                st.markdown("#### Словоформи")
-            with side_btn_col:
-                if st.button("◀", key="dict_close_left_panel", help="Згорнути ліве поле"):
-                    st.session_state["dict_left_panel_open"] = False
-                    st.rerun()
-            selected_wordform, selected_frequency = select_wordform_ui(wf_alpha, freq_map, "left_v4")
-            if selected_wordform:
-                st.session_state["dict_current_wordform"] = selected_wordform
-            st.markdown("#### Створені статті")
-            existing_query = st.text_input("Пошук у вже створених статтях", key="dict_existing_search_left_v4")
-            existing_words = lexdb.search_words(existing_query, limit=500)
-            if existing_words:
-                selected_existing = st.selectbox(
-                    "Відкрити статтю",
-                    options=[0] + [w["ID"] for w in existing_words],
-                    format_func=lambda x: "— не вибрано —" if x == 0 else next((w["РЕЄСТРОВА ОДИНИЦЯ"] for w in existing_words if w["ID"] == x), str(x)),
-                    key="dict_existing_word_select_left_v4",
-                )
+
+def word_id_select(label: str, all_words: list[dict], key: str, default_id: int | None = None) -> int | None:
+    options = [0] + [int(w["ID"]) for w in all_words]
+    labels = {int(w["ID"]): str(w.get("РЕЄСТРОВА ОДИНИЦЯ") or w.get("ID")) for w in all_words}
+    index = options.index(int(default_id)) if default_id and int(default_id) in options else 0
+    selected = st.selectbox(label, options=options, index=index, format_func=lambda x: "— не вибрано —" if x == 0 else labels.get(int(x), str(x)), key=key)
+    return int(selected) if selected else None
+
+
+def has_marked_stress(value: str) -> bool:
+    value = str(value or "")
+    return any(ch in "АЕЄИІЇОУЮЯ" for ch in value)
+
+
+def syllable_count(value: str) -> int:
+    return sum(1 for ch in str(value or "") if ch in VOWELS_UA)
+
+
+def format_source_label(q: dict) -> str:
+    abbr = str(q.get("ДЖЕРЕЛО_СКОРОЧЕННЯ") or q.get("СКОРОЧЕННЯ") or "").strip()
+    return abbr or "джерело не вказано"
+
+
+
+def display_stressed_headword(stressed_form: str, fallback: str = "") -> str:
+    """Перетворює форму типу боротьбА на БОРОТЬБА́."""
+    raw = str(stressed_form or "").strip() or str(fallback or "").strip()
+    out: list[str] = []
+    stressed_done = False
+    for ch in raw:
+        if ch in "АЕЄИІЇОУЮЯ" and not stressed_done:
+            out.append(ch.upper() + "\u0301")
+            stressed_done = True
+        else:
+            out.append(ch.upper())
+    return "".join(out)
+
+
+def html_join_semicolon(values: list[str]) -> str:
+    return "; ".join(v for v in values if str(v or "").strip())
+
+
+def split_semicolon_values(raw: str) -> list[str]:
+    return [p.strip() for p in str(raw or "").split(";") if p.strip()]
+
+
+def definition_number_map(definitions: list[dict]) -> dict[int, int]:
+    return {int(d.get("ID")): idx for idx, d in enumerate(definitions, start=1) if d.get("ID")}
+
+
+def quote_sources_for_wordform(wf: dict) -> str:
+    sources = sorted({format_source_label(q) for q in wf.get("quotes", []) or [] if format_source_label(q) != "джерело не вказано"})
+    return "[" + ", ".join(sources) + "]" if sources else "[…]"
+
+
+def highlight_entry_terms_html(text_value: str, article: dict) -> str:
+    word = article.get("word") or {}
+    terms = [str(word.get("РЕЄСТРОВА ОДИНИЦЯ") or "").strip()]
+    for wf in article.get("wordforms", []) or []:
+        terms.append(str(wf.get("СЛОВОФОРМА") or "").strip())
+    for variant in article.get("variants", []) or []:
+        terms.append(str(variant.get("ВАРІЯНТ") or "").strip())
+        terms.append(str(variant.get("НАГОЛОШЕНА ФОРМА") or "").strip())
+        for variant_wf in variant.get("wordforms", []) or []:
+            terms.append(str(variant_wf.get("СЛОВОФОРМА") or "").strip())
+    escaped = html.escape(str(text_value or ""))
+    for term in sorted({t for t in terms if t}, key=len, reverse=True):
+        pattern = re.compile(re.escape(html.escape(term)), flags=re.IGNORECASE)
+        escaped = pattern.sub(lambda m: f"<strong class='dict-hit'>{m.group(0)}</strong>", escaped)
+    return escaped
+
+
+def format_grammar_zone_html(article: dict, definition_numbers: dict[int, int]) -> str:
+    wordforms = article.get("wordforms") or []
+    if not wordforms:
+        return ""
+    groups: dict[str, list[dict]] = {}
+    for wf in wordforms:
+        grammar = str(wf.get("ГРАМАТИЧНІ ОЗНАКИ") or "грам. ознаки не вказано").strip()
+        groups.setdefault(grammar, []).append(wf)
+    group_html: list[str] = []
+    for grammar, items in groups.items():
+        wf_parts: list[str] = []
+        for wf in items:
+            form = html.escape(str(wf.get("СЛОВОФОРМА") or ""))
+            def_id = safe_int(wf.get("ТЛУМАЧЕННЯ_ID"), 0) or safe_int(wf.get("ЗНАЧЕННЯ_ID"), 0)
+            meaning_num = definition_numbers.get(def_id)
+            meaning_part = f" {meaning_num}." if meaning_num else ""
+            freq_part = f" ({safe_int(wf.get('ЧАСТОТА'), 0)})"
+            sources_part = quote_sources_for_wordform(wf)
+            styl = str(wf.get("СТИЛІСТИКА") or "").strip()
+            styl_part = f" <em>{html.escape(styl)}</em>" if styl else ""
+            wf_parts.append(f"<strong>{form}</strong>{meaning_part}{freq_part}{styl_part} {html.escape(sources_part)}")
+        group_html.append(f"<strong><em>{html.escape(grammar)}</em></strong> " + ", ".join(wf_parts))
+    return "<div class='dict-grammar-zone'><span class='dict-symbol'>•</span> " + "; ".join(group_html) + ".</div>"
+
+
+def format_ready_dictionary_entry_html(article: dict, font_family: str = "Georgia, Cambria, 'Times New Roman', serif", font_size: int = 18, compact: bool = False) -> str:
+    word = article.get("word") or {}
+    if not word:
+        return ""
+    register = str(word.get("РЕЄСТРОВА ОДИНИЦЯ") or "").strip()
+    head = display_stressed_headword(str(word.get("НАГОЛОШЕНА ФОРМА") or ""), register)
+    total_freq = safe_int(word.get("ЧАСТОТА"), 0)
+    variants = article.get("variants") or []
+    definitions = article.get("definitions") or []
+    definition_numbers = definition_number_map(definitions)
+
+    variant_html: list[str] = []
+    variant_frequency_sum = 0
+    for v in variants:
+        label = display_stressed_headword(str(v.get("НАГОЛОШЕНА ФОРМА") or v.get("ВАРІЯНТ") or ""), str(v.get("ВАРІЯНТ") or ""))
+        freq = safe_int(v.get("ЧАСТОТА"), 0)
+        variant_frequency_sum += freq
+        if label:
+            variant_html.append(f"<span class='dict-variant'>{html.escape(label)}{f' ({freq})' if freq else ''}</span>")
+
+    pos = str(word.get("ЧАСТИНА МОВИ") or "").strip()
+    grammar = str(word.get("ГРАМАТИЧНІ ОЗНАКИ") or "").strip()
+    styl = str(word.get("СТИЛІСТИКА") or "").strip()
+    grammar_line = html_join_semicolon([pos, grammar, styl])
+    origin = str(word.get("ПОХОДЖЕННЯ") or "").strip()
+
+    if variant_html and total_freq >= variant_frequency_sum:
+        head_frequency = total_freq - variant_frequency_sum
     else:
-        toggle_col, right_col = st.columns([0.16, 4.34], gap="small")
-        with toggle_col:
-            st.markdown("<div class='dict-compact-toggle'>", unsafe_allow_html=True)
-            if st.button("▶", key="dict_open_left_panel", help="Розгорнути ліве поле"):
-                st.session_state["dict_left_panel_open"] = True
-                st.rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
-        selected_wordform = st.session_state.get("dict_current_wordform")
-        selected_frequency = int(freq_map.get(selected_wordform, 0)) if selected_wordform else 0
+        head_frequency = total_freq
 
-    if not selected_wordform:
-        with right_col:
-            st.info("Оберіть словоформу в лівому полі.")
+    if variant_html:
+        head_block = (
+            f"<strong>{html.escape(head)}</strong> <span class='dict-total'>({head_frequency})</span> "
+            "/ " + " / ".join(variant_html) + f" <span class='dict-total-separator'>|</span> <span class='dict-total'>({total_freq})</span>."
+        )
+    else:
+        head_block = f"<strong>{html.escape(head)}</strong> <span class='dict-total'>({total_freq})</span>."
+
+    parts: list[str] = []
+    parts.append(
+        "<div class='dict-entry-head'>"
+        + head_block
+        + (" " + f"<em>{html.escape(grammar_line)}</em>" if grammar_line else "")
+        + (f" <span class='dict-etym'>‹{html.escape(origin)}›</span>" if origin else "")
+        + "</div>"
+    )
+
+    for i, d in enumerate(definitions, start=1):
+        d_freq = safe_int(d.get("ЧАСТОТА"), 0)
+        d_styl = str(d.get("СТИЛІСТИКА") or "").strip()
+        d_text = str(d.get("ТЛУМАЧЕННЯ") or "").strip()
+        rem = f" <em>{html.escape(d_styl)}</em>" if d_styl else ""
+        parts.append(f"<div class='dict-def-line'><strong>{i}. ({d_freq})</strong>{rem} {html.escape(d_text)}</div>")
+        for sub in d.get("subdefinitions", []) or []:
+            sub_txt = str(sub.get("ТЕКСТ") or "").strip()
+            if sub_txt:
+                sub_freq = safe_int(sub.get("ЧАСТОТА"), 0)
+                sub_styl = str(sub.get("СТИЛІСТИКА") or "").strip()
+                sub_meta = f"({sub_freq}) " if sub_freq else ""
+                sub_rem = f"<em>{html.escape(sub_styl)}</em> " if sub_styl else ""
+                parts.append(f"<div class='dict-subdef'>// {sub_meta}{sub_rem}{html.escape(sub_txt)}</div>")
+        for q in d.get("quotes", []) or []:
+            first = str(q.get("ПЕРШОДРУК") or "").strip()
+            if first:
+                parts.append(f"<div class='dict-illustration'>{highlight_entry_terms_html(first, article)} <span class='dict-source'>[{html.escape(format_source_label(q))}]</span></div>")
+            reprint = str(q.get("ПЕРЕДРУК") or "").strip()
+            if reprint:
+                parts.append(f"<div class='dict-reprint'><span class='dict-symbol'>↕</span> {highlight_entry_terms_html(reprint, article)} <span class='dict-source'>[ПУР-1978].</span></div>")
+
+    rels = article.get("semantic_relations") or []
+    syns = [str(r.get("ОДИНИЦЯ") or "").strip() for r in rels if str(r.get("ТИП") or "") == "синонім" and str(r.get("ОДИНИЦЯ") or "").strip()]
+    ants = [str(r.get("ОДИНИЦЯ") or "").strip() for r in rels if str(r.get("ТИП") or "") == "антонім" and str(r.get("ОДИНИЦЯ") or "").strip()]
+    if syns:
+        parts.append("<div class='dict-rel'><span class='dict-symbol'>=</span> " + html.escape("; ".join(syns)) + ".</div>")
+    if ants:
+        parts.append("<div class='dict-rel'><span class='dict-symbol'>≠</span> " + html.escape("; ".join(ants)) + ".</div>")
+
+    collocations = article.get("collocations") or []
+    if collocations:
+        parts.append("<div class='dict-zone-label'><span class='dict-symbol'>♦</span> Фразеологічно-сполучувальна зона</div>")
+        for c in collocations:
+            c_unit = str(c.get("ОДИНИЦЯ") or "").strip()
+            c_meta = html_join_semicolon([str(c.get("ТИП") or "").strip(), f"частота {safe_int(c.get('ЧАСТОТА'), 0)}" if safe_int(c.get("ЧАСТОТА"), 0) else "", str(c.get("СТИЛІСТИКА") or "").strip()])
+            c_def = str(c.get("ТЛУМАЧЕННЯ") or "").strip()
+            parts.append(f"<div class='dict-coll'><strong>{html.escape(c_unit)}</strong>{f' <em>({html.escape(c_meta)})</em>' if c_meta else ''}{' — ' + html.escape(c_def) if c_def else ''}</div>")
+            for q in c.get("quotes", []) or []:
+                first = str(q.get("ПЕРШОДРУК") or "").strip()
+                if first:
+                    parts.append(f"<div class='dict-illustration'>{highlight_entry_terms_html(first, article)} <span class='dict-source'>[{html.escape(format_source_label(q))}]</span></div>")
+                reprint = str(q.get("ПЕРЕДРУК") or "").strip()
+                if reprint:
+                    parts.append(f"<div class='dict-reprint'><span class='dict-symbol'>↕</span> {highlight_entry_terms_html(reprint, article)} <span class='dict-source'>[ПУР-1978].</span></div>")
+
+    grammar_zone = format_grammar_zone_html(article, definition_numbers)
+    if grammar_zone:
+        parts.append(grammar_zone)
+
+    crossrefs = article.get("crossrefs") or []
+    refs = [str(r.get("ТЕКСТ") or "").strip() for r in crossrefs if str(r.get("ТЕКСТ") or "").strip()]
+    if refs:
+        parts.append("<div class='dict-crossref'><span class='dict-symbol'>→</span> " + html.escape("; ".join(refs)) + ".</div>")
+
+    spacing_class = " compact" if compact else ""
+    return f"<div class='dict-preview-card{spacing_class}' style=\"font-family:{html.escape(font_family)}; font-size:{int(font_size)}px;\">" + "\n".join(parts) + "</div>"
+
+
+def format_ready_dictionary_entry(article: dict) -> str:
+    html_text = format_ready_dictionary_entry_html(article)
+    html_text = re.sub(r"<br\s*/?>", "\n", html_text)
+    html_text = re.sub(r"</div>\s*<div", "\n<div", html_text)
+    html_text = re.sub(r"<[^>]+>", "", html_text)
+    return html.unescape(html_text).strip()
+
+
+def validate_dictionary_article(article: dict) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    word = article.get("word") or {}
+    if not word:
+        errors.append("Статтю ще не створено: спершу збережіть реєстрову одиницю.")
+        return errors, warnings
+    register = str(word.get("РЕЄСТРОВА ОДИНИЦЯ") or "").strip()
+    stressed = str(word.get("НАГОЛОШЕНА ФОРМА") or "").strip()
+    if not register:
+        errors.append("Не заповнено реєстрову одиницю.")
+    if syllable_count(register) > 1 and not has_marked_stress(stressed):
+        warnings.append("Для понадодноскладового слова бажано подати наголошену форму: напр., боротьбА.")
+    if not word.get("ЧАСТИНА МОВИ"):
+        errors.append("Не вказано частину мови.")
+    if not word.get("ГРАМАТИЧНІ ОЗНАКИ"):
+        warnings.append("Не заповнено граматичні ознаки леми.")
+    definitions = article.get("definitions") or []
+    if not definitions:
+        errors.append("Немає жодного тлумачення / функційного пояснення.")
+    else:
+        for i, d in enumerate(definitions, start=1):
+            if not str(d.get("ТЛУМАЧЕННЯ") or "").strip():
+                errors.append(f"Значення {i} не має тексту тлумачення.")
+            if not (d.get("quotes") or []):
+                warnings.append(f"Значення {i} не має прикріпленої ілюстрації.")
+    all_quotes = []
+    for d in definitions:
+        all_quotes.extend(d.get("quotes") or [])
+    for c in article.get("collocations") or []:
+        all_quotes.extend(c.get("quotes") or [])
+    for q in all_quotes:
+        if not str(q.get("ПЕРШОДРУК") or "").strip():
+            errors.append(f"Цитата ID {q.get('ID')} не має тексту першодруку.")
+        if not (q.get("ДЖЕРЕЛО_ID") or q.get("ДЖЕРЕЛО_СКОРОЧЕННЯ")):
+            warnings.append(f"Цитата ID {q.get('ID')} не має джерельної паспортизації.")
+    return errors, warnings
+
+
+def render_dictionary_css() -> None:
+    st.markdown(
+        """
+        <style>
+        .st-key-dict_full_editor {
+            max-width: 1120px !important;
+            margin-left: auto !important;
+            margin-right: auto !important;
+        }
+        .dict-compiler-guide,
+        div[class*="st-key-dict_zone_"] {
+            width: min(100%, 1080px);
+            margin: 1.05rem auto;
+            padding: 1.25rem 1.35rem;
+            border-radius: 22px;
+            background: linear-gradient(180deg, rgba(255,252,244,0.98), rgba(255,246,233,0.95));
+            border: 1px solid rgba(241,198,90,0.42);
+            box-shadow: 0 18px 38px rgba(0,0,0,0.20), 0 0 0 1px rgba(255,255,255,0.70) inset;
+            color: #24171f !important;
+        }
+        div[class*="st-key-dict_zone_"] * { color: #24171f !important; }
+        div[class*="st-key-dict_zone_"] button *,
+        div[class*="st-key-dict_zone_"] div[data-testid="stFormSubmitButton"] button * { color: #ffffff !important; }
+        .dict-compiler-guide * { color: #24171f !important; }
+        .dict-compiler-guide h3 {
+            text-align: center;
+            margin: 0 0 0.75rem 0;
+            color: #76001f !important;
+            font-size: 1.42rem;
+            font-weight: 950;
+        }
+        .dict-compiler-guide p, .dict-compiler-guide li {
+            font-size: 1.01rem;
+            line-height: 1.58;
+        }
+        .dict-guide-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.62rem 0.72rem;
+            margin-top: 0.9rem;
+        }
+        .dict-guide-item {
+            padding: 0.72rem 0.82rem;
+            border-radius: 14px;
+            background: rgba(255,255,255,0.72);
+            border: 1px solid rgba(176,112,44,0.22);
+            line-height: 1.46;
+            font-size: 0.96rem;
+        }
+        .dict-guide-title {
+            color: #76001f !important;
+            font-weight: 950;
+        }
+        .dict-download-spacer { height: 0.95rem; }
+        .dict-zone-heading {
+            width: min(100%, 1080px);
+            margin: 1.45rem auto 0.65rem auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.85rem;
+            text-align: left;
+        }
+        .dict-zone-number {
+            width: 42px;
+            height: 42px;
+            border-radius: 999px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 950;
+            color: #fff8ec;
+            background: radial-gradient(circle at 35% 28%, #e7bb55, #76001f 62%, #3a000d 100%);
+            box-shadow: 0 0 18px rgba(241,198,90,0.36);
+            flex: 0 0 auto;
+        }
+        .dict-zone-heading h3 {
+            margin: 0;
+            color: #fff8ec !important;
+            font-size: 1.48rem;
+            font-weight: 950;
+            letter-spacing: -0.01em;
+        }
+        .dict-zone-heading p {
+            margin: 0.16rem 0 0 0;
+            color: rgba(255,248,236,0.82) !important;
+            font-size: 0.98rem;
+        }
+        .dict-section-note {
+            color: #5e4651 !important;
+            font-size: 0.96rem;
+            line-height: 1.5;
+            margin: 0.2rem 0 0.8rem 0;
+        }
+        .dict-preview-card {
+            white-space: normal;
+            font-family: Georgia, Cambria, 'Times New Roman', serif;
+            font-size: 1.08rem;
+            line-height: 1.64;
+            color: #24171f !important;
+            background: rgba(255,253,248,0.98);
+            border-left: 6px solid #76001f;
+            border-radius: 16px;
+            padding: 1rem 1.15rem;
+            box-shadow: 0 10px 24px rgba(0,0,0,0.08);
+        }
+        .dict-preview-card.compact { line-height: 1.38; }
+        .dict-entry-head { margin-bottom: 0.72rem; }
+        .dict-entry-head strong { color: #76001f !important; font-size: 1.34em; letter-spacing: 0.035em; }
+        .dict-total { color: #24171f !important; font-weight: 850; }
+        .dict-variant { color: #5a3b25 !important; font-weight: 800; }
+        .dict-total-separator { color: #76001f !important; font-weight: 950; padding: 0 0.22rem; }
+        .dict-symbol {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 1.55em;
+            height: 1.55em;
+            padding: 0 0.28em;
+            margin-right: 0.28em;
+            border-radius: 0.48em;
+            border: 1.5px solid rgba(118, 0, 31, 0.34);
+            background: linear-gradient(180deg, rgba(118,0,31,0.12), rgba(241,198,90,0.18));
+            color: #76001f !important;
+            font-weight: 950;
+            line-height: 1;
+            box-shadow: 0 3px 8px rgba(118,0,31,0.10);
+        }
+        .dict-etym { color: #5f4a53 !important; font-style: italic; }
+        .dict-def-line { margin: 0.52rem 0 0.2rem 0; }
+        .dict-def-line em, .dict-subdef em { color: #5f4a53 !important; font-style: italic; }
+        .dict-subdef { margin-left: 1.15rem; color: #3c2a34 !important; }
+        .dict-illustration, .dict-reprint { margin: 0.32rem 0 0.32rem 1.15rem; }
+        .dict-reprint { color: #5a3b25 !important; }
+        .dict-hit { color: #76001f !important; background: rgba(118,0,31,0.09); padding: 0 0.12rem; border-radius: 0.22rem; }
+        .dict-source { color: #76001f !important; font-weight: 850; }
+        .dict-rel, .dict-crossref, .dict-grammar-zone { margin-top: 0.55rem; }
+        .dict-zone-label { margin-top: 0.72rem; font-weight: 950; color: #76001f !important; }
+        .dict-coll { margin: 0.38rem 0 0.18rem 1.15rem; }
+        .dict-mini-card {
+            background: rgba(255,255,255,0.78);
+            border: 1px solid rgba(176,112,44,0.24);
+            border-radius: 15px;
+            padding: 0.85rem 0.95rem;
+            margin: 0.55rem 0;
+            color: #24171f !important;
+        }
+        .dict-mini-card * { color: #24171f !important; }
+        .dict-badge-row { display:flex; flex-wrap:wrap; justify-content:center; gap:0.45rem; margin:0.6rem 0; }
+        .dict-badge { padding:0.32rem 0.64rem; border-radius:999px; background:rgba(118,0,31,0.08); color:#76001f !important; font-weight:850; }
+        .dict-context-list-title { color: rgba(255,248,236,0.96) !important; font-weight: 850; margin: 0.75rem 0 0.5rem 0; }
+        .dict-source-header { margin: 1rem 0 0.45rem 0; padding: 0.52rem 0.78rem; border-left: 5px solid rgba(241,198,90,0.82); border-radius: 9px; background: rgba(255,248,236,0.12); color: rgba(255,248,236,0.98) !important; font-weight: 900; box-shadow: 0 8px 18px rgba(0,0,0,0.08); }
+        .dict-kwic-row { display: grid; grid-template-columns: minmax(0, 42%) minmax(126px, 14%) minmax(0, 42%); gap: 9px; align-items: start; background: rgba(255,250,247,0.96); border: 1px solid rgba(176,112,44,0.20); border-radius: 12px; padding: 0.58rem 0.72rem; margin: 0 0 0.45rem 0; box-shadow: 0 7px 16px rgba(0,0,0,0.08); font-family: Georgia, Cambria, 'Times New Roman', serif; font-size: 1.02rem; line-height: 1.43; }
+        .dict-kwic-left { text-align: right; color: #24171f !important; }
+        .dict-kwic-keyword { text-align: center; font-weight: 950; color: #76001f !important; background: rgba(118,0,31,0.075); border-radius: 9px; padding: 0 0.36rem; }
+        .dict-kwic-right { text-align: left; color: #24171f !important; }
+        .st-key-dict_full_editor label p,
+        .st-key-dict_full_editor div[data-testid="stTextInput"] label p,
+        .st-key-dict_full_editor div[data-testid="stTextArea"] label p,
+        .st-key-dict_full_editor div[data-testid="stNumberInput"] label p,
+        .st-key-dict_full_editor div[data-testid="stSelectbox"] label p,
+        .st-key-dict_full_editor div[data-testid="stMultiSelect"] label p,
+        .st-key-dict_full_editor div[data-testid="stCheckbox"] label p {
+            color: rgba(255,248,236,0.96) !important;
+            font-weight: 850 !important;
+        }
+        div[class*="st-key-dict_zone_"] label p,
+        div[class*="st-key-dict_zone_"] div[data-testid="stTextInput"] label p,
+        div[class*="st-key-dict_zone_"] div[data-testid="stTextArea"] label p,
+        div[class*="st-key-dict_zone_"] div[data-testid="stNumberInput"] label p,
+        div[class*="st-key-dict_zone_"] div[data-testid="stSelectbox"] label p,
+        div[class*="st-key-dict_zone_"] div[data-testid="stMultiSelect"] label p,
+        div[class*="st-key-dict_zone_"] div[data-testid="stCheckbox"] label p {
+            color: #24171f !important;
+        }
+        .st-key-dict_lower_tabs div[data-baseweb="tab-list"] {
+            position: static !important;
+            top: auto !important;
+            width: min(100%, 1120px) !important;
+            margin: 0.15rem auto 1.1rem auto !important;
+            padding: 0.35rem !important;
+            gap: 0.45rem !important;
+            border: 1px solid rgba(241,198,90,0.42) !important;
+            border-radius: 18px !important;
+            background: rgba(255,248,236,0.12) !important;
+            box-shadow: 0 12px 26px rgba(0,0,0,0.14) !important;
+            backdrop-filter: blur(4px);
+        }
+        .st-key-dict_lower_tabs button[role="tab"] {
+            border-radius: 13px !important;
+            border: 1px solid rgba(241,198,90,0.32) !important;
+            border-bottom: 1px solid rgba(241,198,90,0.32) !important;
+            background: linear-gradient(180deg, rgba(255,250,241,0.96), rgba(255,238,214,0.92)) !important;
+            color: #5a3b25 !important;
+            min-height: 50px !important;
+            padding: 0.55rem 1.35rem !important;
+            box-shadow: 0 7px 16px rgba(0,0,0,0.11) !important;
+            transform: none !important;
+        }
+        .st-key-dict_lower_tabs button[role="tab"] p {
+            flex-direction: row !important;
+            gap: 0.46rem !important;
+            font-size: 1.02rem !important;
+            font-weight: 900 !important;
+            color: inherit !important;
+        }
+        .st-key-dict_lower_tabs button[role="tab"] p::before { display: none !important; content: none !important; }
+        .st-key-dict_lower_tabs button[role="tab"][aria-selected="true"] {
+            background: linear-gradient(180deg, #9f123a 0%, #76001f 100%) !important;
+            color: #fff8ec !important;
+            border-color: rgba(241,198,90,0.78) !important;
+            box-shadow: 0 12px 24px rgba(0,0,0,0.20), 0 0 0 1px rgba(255,255,255,0.12) inset !important;
+        }
+        .st-key-dict_lower_tabs div.stButton > button,
+        .st-key-dict_lower_tabs div.stButton > button *,
+        .st-key-dict_lower_tabs div[data-testid="stFormSubmitButton"] button,
+        .st-key-dict_lower_tabs div[data-testid="stFormSubmitButton"] button * {
+            color: #ffffff !important;
+        }
+        .st-key-dict_lower_tabs div[data-testid="stDownloadButton"] {
+            margin-top: 0.85rem !important;
+            display: inline-block !important;
+        }
+        .st-key-dict_lower_tabs div[data-testid="stDownloadButton"] button,
+        .st-key-dict_lower_tabs div[data-testid="stDownloadButton"] button * {
+            color: #24171f !important;
+        }
+        .st-key-dict_lower_tabs div[class*="st-key-dict_view_font_size_"] label p,
+        .st-key-dict_lower_tabs div[class*="st-key-dict_view_font_size_"] div,
+        .st-key-dict_lower_tabs div[class*="st-key-dict_view_font_size_"] span,
+        .st-key-dict_lower_tabs div[class*="st-key-dict_view_font_size_"] p {
+            color: #fff8ec !important;
+        }
+        @media (max-width: 820px) {
+            .dict-zone-heading { align-items:flex-start; justify-content:flex-start; }
+            .dict-kwic-row { grid-template-columns: 1fr !important; }
+            .dict-kwic-left, .dict-kwic-keyword, .dict-kwic-right { text-align: left !important; }
+            .dict-guide-grid { grid-template-columns: 1fr !important; }
+            .st-key-dict_lower_tabs div[data-baseweb="tab-list"] { display: grid !important; grid-template-columns: 1fr 1fr !important; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_zone_box_start() -> None:
+    return None
+
+
+def render_zone_box_end() -> None:
+    return None
+
+
+def render_dictionary_tab(wordforms_df: pd.DataFrame) -> None:
+    render_dictionary_css()
+    st.subheader("Словник мови Степана Бандери")
+    st.caption("Повний редактор словникової статті: від корпусної словоформи до готової лексикографічної статті.")
+
+    user = render_dictionary_auth()
+    if user is None:
         return
+    render_dictionary_admin_panel(user)
+    render_dictionary_options_admin_panel(user)
 
-    with right_col:
-        all_words = lexdb.search_words("", limit=10000)
-        selected_word = lexdb.get_word(int(selected_existing)) if selected_existing else None
-        created_lemma_options = [0] + [int(w["ID"]) for w in all_words]
-        created_lemma_labels = {int(w["ID"]): f"{w['РЕЄСТРОВА ОДИНИЦЯ']} · {w.get('ЧАСТИНА МОВИ') or '—'} · частота {int(w.get('ЧАСТОТА') or 0)}" for w in all_words}
-        default_lemma_choice = int(selected_existing or 0)
-
-        st.markdown("<div class='dictionary-editor-title'><h3>Картка реєстрової одиниці</h3></div>", unsafe_allow_html=True)
-        st.caption("Для розведення омонімії створюйте окремі реєстрові одиниці вручну, наприклад: воля¹, воля².")
-
-        chosen_lemma_id = st.selectbox(
-            "Вибрати лему з уже створених статей",
-            options=created_lemma_options,
-            index=created_lemma_options.index(default_lemma_choice) if default_lemma_choice in created_lemma_options else 0,
-            format_func=lambda x: "— створити нову лему —" if x == 0 else created_lemma_labels.get(int(x), str(x)),
-            key=f"dict_choose_existing_lemma_{selected_wordform}_{selected_existing}",
-        )
-        if chosen_lemma_id:
-            selected_word = lexdb.get_word(int(chosen_lemma_id))
-            current_word_id = int(chosen_lemma_id)
-        else:
-            current_word_id = None
-
-        default_register = selected_word.get("РЕЄСТРОВА ОДИНИЦЯ") if selected_word else selected_wordform
-        card_col1, card_col2, card_col3 = st.columns([2.3, 0.95, 0.95])
-        with card_col1:
-            register = st.text_input("Реєстрова одиниця / лема", value=str(default_register or ""), key=f"dict_register_{selected_wordform}_{chosen_lemma_id}")
-        existing_by_register = lexdb.get_word_by_register(register) if register.strip() and not current_word_id else None
-        if not current_word_id and existing_by_register:
-            current_word_id = int(existing_by_register["ID"])
-            selected_word = existing_by_register
-        current_word = lexdb.get_word(current_word_id) if current_word_id else selected_word
-        with card_col2:
-            st.metric("Частота словоформи", int(selected_frequency))
-        with card_col3:
-            st.metric("Частота леми", int((current_word or {}).get("ЧАСТОТА") or 0))
-
-        pos_default = str((current_word or selected_word or {}).get("ЧАСТИНА МОВИ") or "")
-        pos = dictionary_option_select("Частина мови", "ЧАСТИНА МОВИ", pos_default, key_prefix=f"dict_pos_{selected_wordform}_{chosen_lemma_id}")
-        lemma_grammar = grammar_multiselect_for_pos(
-            "Граматичні ознаки леми",
-            pos,
-            str((current_word or selected_word or {}).get("ГРАМАТИЧНІ ОЗНАКИ") or ""),
-            key_prefix=f"dict_lemma_gram_{selected_wordform}_{chosen_lemma_id}_{pos}",
-        )
-        current_wordform = lexdb.get_wordform(int(current_word_id), selected_wordform) if current_word_id else None
-        wf_grammar_default = str((current_wordform or {}).get("ГРАМАТИЧНІ ОЗНАКИ") or "")
-        wordform_grammar = grammar_multiselect_for_pos(
-            "Граматичні ознаки словоформи",
-            pos,
-            wf_grammar_default,
-            key_prefix=f"dict_wordform_gram_{selected_wordform}_{chosen_lemma_id}_{pos}",
-        )
-        lemma_stylistics = dictionary_option_multiselect(
-            "Стилістичні / функційні ремарки леми",
-            "СТИЛІСТИКА",
-            str((current_word or selected_word or {}).get("СТИЛІСТИКА") or ""),
-            key_prefix=f"dict_lemma_styl_{selected_wordform}_{chosen_lemma_id}",
-        )
-        st.markdown("<div class='dict-origin-label'>Походження / лексикографічний коментар</div>", unsafe_allow_html=True)
-        origin = st.text_area(
-            "Походження / лексикографічний коментар",
-            value=str((current_word or selected_word or {}).get("ПОХОДЖЕННЯ") or ""),
-            height=90,
-            key=f"dict_origin_{selected_wordform}_{chosen_lemma_id}",
-            label_visibility="collapsed",
+    with keyed_container("dict_full_editor"):
+        st.markdown(
+            """
+            <div class='dict-compiler-guide'>
+            <h3>Інструкція для укладача</h3>
+            <p><strong>Працюйте послідовно згори донизу.</strong> Кожна зона відповідає окремому фрагментові майбутньої словникової статті. Спершу виберіть словоформу або відкрийте вже створену статтю, далі збережіть реєстрову й граматичну зону, після цього додавайте варіянти, значення, ілюстрації, сталі сполуки, синоніми, антоніми та відсилання.</p>
+            <div class='dict-guide-grid'>
+                <div class='dict-guide-item'><span class='dict-guide-title'>1. Навігація.</span> Оберіть корпусну словоформу або вже створену статтю. Це визначає, з яким матеріалом працює редактор.</div>
+                <div class='dict-guide-item'><span class='dict-guide-title'>2. Реєстрова зона.</span> Уведіть основну лему й наголошену форму. Наголос позначайте великою голосною: <em>боротьбА, УкраїнА, революцІя</em>.</div>
+                <div class='dict-guide-item'><span class='dict-guide-title'>3. Граматика й стилістика.</span> Заповніть частину мови, граматичні ознаки, стилістичні ремарки та етимологічну довідку. Позначку <strong>‹…›</strong> система поставить сама.</div>
+                <div class='dict-guide-item'><span class='dict-guide-title'>4. Варіянти.</span> Додавайте тільки лексикографічно значущі варіянти. Якщо варіянт має словоформи, зводьте їх до цього варіянта: частота підсумується автоматично.</div>
+                <div class='dict-guide-item'><span class='dict-guide-title'>5. Словоформи.</span> Однакова словоформа може мати різні граматичні, стилістичні й семантичні параметри, тому за потреби створюйте окремі записи.</div>
+                <div class='dict-guide-item'><span class='dict-guide-title'>6. Значення.</span> Формулюйте тлумачення або функційне пояснення. Частота значення визначається кількістю прикріплених ілюстрацій.</div>
+                <div class='dict-guide-item'><span class='dict-guide-title'>7. Ілюстрації.</span> Добирайте контексти з конкордансу, редагуйте їх перед збереженням, скорочення позначайте як <strong>[…]</strong>, джерело першодруку вибирайте зі списку.</div>
+                <div class='dict-guide-item'><span class='dict-guide-title'>8. ПУР-1978.</span> Якщо є редакційна відмінність, внесіть її в поле «Передрук ПУР-1978» — у статті автоматично з’явиться зона <strong>↕</strong>.</div>
+                <div class='dict-guide-item'><span class='dict-guide-title'>9. Сталі сполуки.</span> Уносіть фразеологізми, політичні формули й термінологізовані сполуки; для них також можна додавати ілюстрації.</div>
+                <div class='dict-guide-item'><span class='dict-guide-title'>10. Перегляд.</span> Символи <strong>/</strong>, <strong>→</strong>, <strong>♦</strong>, <strong>•</strong>, <strong>=</strong>, <strong>≠</strong> уводити вручну не треба: готова стаття формується автоматично.</div>
+            </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-        st.markdown("### Тлумачення")
-        defs_existing = []
-        if current_word_id:
-            existing_article = lexdb.get_dictionary_article(current_word_id)
-            defs_existing = existing_article.get("definitions") or []
-        if defs_existing:
-            def_labels = {int(d["ID"]): f"{i + 1}. {str(d.get('ТЛУМАЧЕННЯ') or '')[:90]}" for i, d in enumerate(defs_existing)}
-            attach_def_id = st.selectbox(
-                "Прикріпити вибрані нижче цитати до вже створеного значення",
-                options=[0] + list(def_labels.keys()),
-                format_func=lambda x: "— не вибрано —" if x == 0 else def_labels.get(int(x), str(x)),
-                key=f"dict_attach_existing_def_{current_word_id}_{selected_wordform}",
-            )
-        else:
-            attach_def_id = 0
-            st.caption("Створених значень для цієї леми ще немає. Нове значення можна записати нижче й зберегти в кінці картки.")
+        wf_alpha = wordforms_df[["wordform", "frequency"]].dropna().copy()
+        wf_alpha["wordform"] = wf_alpha["wordform"].astype(str)
+        wf_alpha = wf_alpha.sort_values("wordform", key=lambda s: s.str.casefold())
+        freq_map = dict(zip(wf_alpha["wordform"], wf_alpha["frequency"]))
 
-        definition_text = st.text_area("Нове значення / текст тлумачення", height=120, key=f"dict_definition_text_{current_word_id or 'new'}_{selected_wordform}")
-        def_col1, def_col2 = st.columns([1, 2])
-        with def_col1:
-            def_frequency = st.number_input("Частота в цьому значенні", min_value=0, value=0, step=1, key=f"dict_def_freq_{current_word_id or 'new'}_{selected_wordform}")
-        with def_col2:
-            def_stylistics = dictionary_option_multiselect("Стилістика значення", "СТИЛІСТИКА", "", key_prefix=f"dict_def_styl_{current_word_id or 'new'}_{selected_wordform}")
-        ref_col1, ref_col2 = st.columns([1, 2])
-        with ref_col1:
-            ref_abbr = st.text_input("Скорочення покликання", placeholder="Напр.: СУМ-11", key=f"dict_ref_abbr_{current_word_id or 'new'}_{selected_wordform}")
-        with ref_col2:
-            ref_title = st.text_input("Повна назва покликання", placeholder="Словник / праця, використана для дефініції", key=f"dict_ref_title_{current_word_id or 'new'}_{selected_wordform}")
-        attach_new_definition = st.checkbox("Прикріпити вибрані нижче цитати до нового значення", value=True, key=f"dict_def_attach_{current_word_id or 'new'}_{selected_wordform}")
+        all_words = cached_lexdb_search_words("", limit=20000)
+        selected_existing = 0
+        selected_wordform = None
+        selected_frequency = 0
 
-        st.markdown("### СТАЛІ СПОЛУКИ / ФРАЗЕОЛОГІЗМИ")
-        unit = st.text_input("Одиниця", placeholder="Наприклад: визвольна боротьба", key=f"dict_coll_unit_{current_word_id or 'new'}_{selected_wordform}")
-        unit_type = dictionary_option_select("Тип одиниці", "ТИП СТІЙКОЇ СПОЛУКИ", "", key_prefix=f"dict_coll_type_{current_word_id or 'new'}_{selected_wordform}")
-        coll_definition = st.text_area("Тлумачення сполуки / фразеологізму", height=90, key=f"dict_coll_definition_{current_word_id or 'new'}_{selected_wordform}")
-        coll_col1, coll_col2 = st.columns([1, 2])
-        with coll_col1:
-            coll_frequency = st.number_input("Частота сполуки", min_value=0, value=0, step=1, key=f"dict_coll_freq_{current_word_id or 'new'}_{selected_wordform}")
-        with coll_col2:
-            coll_stylistics = dictionary_option_multiselect("Стилістика сполуки", "СТИЛІСТИКА", "", key_prefix=f"dict_coll_styl_{current_word_id or 'new'}_{selected_wordform}")
-        attach_coll_quotes = st.checkbox("Прикріпити вибрані нижче цитати до цієї сполуки / фразеологізму", value=True, key=f"dict_coll_attach_{current_word_id or 'new'}_{selected_wordform}")
+        dict_zone_header(1, "Навігація й вибір матеріалу", "Виберіть корпусну словоформу або відкрийте вже створену словникову статтю.")
+        nav_box = keyed_container("dict_zone_navigation")
+        with nav_box:
+            render_zone_box_start()
+            nav1, nav2 = st.columns([1.15, 1.15], gap="large")
+            with nav1:
+                selected_wordform, selected_frequency = select_wordform_ui(wf_alpha, freq_map, "full_editor")
+                if selected_wordform:
+                    st.session_state["dict_current_wordform"] = selected_wordform
+            with nav2:
+                existing_query = st.text_input("Пошук у створених статтях", placeholder="Наприклад: боротьба", key="dict_existing_search_full")
+                existing_words = cached_lexdb_search_words(existing_query, limit=600)
+                if existing_words:
+                    selected_existing = st.selectbox(
+                        "Відкрити створену статтю",
+                        options=[0] + [int(w["ID"]) for w in existing_words],
+                        format_func=lambda x: "— не вибрано —" if x == 0 else next((str(w["РЕЄСТРОВА ОДИНИЦЯ"]) for w in existing_words if int(w["ID"]) == int(x)), str(x)),
+                        key="dict_existing_word_select_full",
+                    )
+                else:
+                    st.info("Створених статей за цим фільтром не знайдено.")
+            render_zone_box_end()
 
-        st.markdown("### Конкорданс вибраної словоформи")
-        control_col1, control_col2, control_col3, control_col4 = st.columns([1.35, 0.82, 1.05, 1.05])
-        with control_col1:
-            dict_mode = st.selectbox("Режим контексту", ["Реченнєвий контекст", "Контекст фіксованої глибини"], index=0, key=f"dict_context_mode_{selected_wordform}")
-        with control_col2:
-            dict_depth = st.number_input("Глибина", min_value=1, max_value=50, value=7, step=1, key=f"dict_context_depth_{selected_wordform}")
-        with control_col3:
-            dict_variants_choice = st.selectbox("Варіянтні реєстрові одиниці", ["Показувати", "Не показувати"], index=0, key=f"dict_context_variants_{selected_wordform}")
-        with control_col4:
-            context_limit = st.number_input("Кількість контекстів для добору ілюстрацій", min_value=10, max_value=1000, value=80, step=10, key=f"dict_context_limit_{selected_wordform}")
-
-        use_dict_variants = dict_variants_choice == "Показувати"
-        found_wordforms = get_wordforms_for_queries([selected_wordform], use_dict_variants, wordforms_df)
-        if not found_wordforms:
-            found_wordforms = [selected_wordform]
-        available_codes_df = fetch_available_codes(STAMP, tuple(found_wordforms))
-        code_options = available_codes_df["code"].tolist() if not available_codes_df.empty else []
-        code_labels = {row.code: f"{row.code} — {row.title} ({int(row.hits)})" for row in available_codes_df.itertuples(index=False)}
-        selected_codes = st.multiselect(
-            "Фільтр за кодом статті",
-            options=code_options,
-            default=[],
-            format_func=lambda c: code_labels.get(c, c),
-            key=f"dict_context_codes_{selected_wordform}",
-        )
-        total_hits = count_contexts(STAMP, tuple(found_wordforms), tuple(selected_codes))
-        header = format_register_header(found_wordforms, wordforms_df, use_dict_variants)
-        st.markdown(render_register_card(header, total_hits, len(available_codes_df), dict_mode, int(dict_depth)), unsafe_allow_html=True)
-        ctx_df = fetch_contexts(STAMP, tuple(found_wordforms), dict_mode, int(dict_depth), tuple(selected_codes), int(context_limit))
-        if ctx_df.empty:
-            st.info("Для цієї словоформи немає контекстів.")
-            selected_contexts = pd.DataFrame()
-        else:
-            selected_contexts = render_context_selector(ctx_df, selected_wordform)
-
-        st.markdown("---")
-        if st.button("Зберегти / оновити всю картку словникової статті", type="primary", key=f"dict_save_full_card_{selected_wordform}_{chosen_lemma_id}"):
-            if not register.strip():
-                st.error("Реєстрова одиниця не може бути порожньою.")
+        current_word_id = int(selected_existing or 0) or None
+        article = cached_lexdb_get_dictionary_article_full(current_word_id) if current_word_id else {"word": None, "wordforms": [], "definitions": [], "collocations": [], "variants": [], "crossrefs": [], "semantic_relations": []}
+        current_word = article.get("word") or {}
+        if current_word_id and not selected_wordform:
+            wfs = article.get("wordforms") or []
+            if wfs:
+                selected_wordform = str(wfs[0].get("СЛОВОФОРМА") or "")
+                selected_frequency = safe_int(wfs[0].get("ЧАСТОТА"), 0)
             else:
-                word_id = lexdb.save_word(current_word_id, register, 0, pos, lemma_grammar, lemma_stylistics, origin)
-                lexdb.upsert_wordform(word_id, selected_wordform, selected_frequency, pos=pos, grammar=wordform_grammar, stylistics="")
-                lexdb.recompute_word_frequency(word_id)
+                selected_wordform = str(current_word.get("РЕЄСТРОВА ОДИНИЦЯ") or "")
+                selected_frequency = safe_int(current_word.get("ЧАСТОТА"), 0)
+        if not selected_wordform and st.session_state.get("dict_current_wordform"):
+            selected_wordform = st.session_state.get("dict_current_wordform")
+            selected_frequency = safe_int(freq_map.get(selected_wordform), 0)
 
-                quote_ids: list[int] = []
-                if not selected_contexts.empty:
-                    quote_ids = save_selected_contexts_as_quotes(word_id, selected_wordform, selected_frequency, selected_contexts, pos=pos, grammar=wordform_grammar)
+        if not selected_wordform and not current_word_id:
+            st.info("Оберіть словоформу або відкрийте вже створену статтю.")
+            return
 
-                if attach_def_id and quote_ids:
-                    for qid in quote_ids:
-                        lexdb.link_definition_quote(int(attach_def_id), qid)
+        default_register = str(current_word.get("РЕЄСТРОВА ОДИНИЦЯ") or selected_wordform or "")
+        default_stressed = str(current_word.get("НАГОЛОШЕНА ФОРМА") or "")
+        default_pos = str(current_word.get("ЧАСТИНА МОВИ") or "")
+        default_grammar = str(current_word.get("ГРАМАТИЧНІ ОЗНАКИ") or "")
+        default_stylistics = str(current_word.get("СТИЛІСТИКА") or "")
+        default_origin = str(current_word.get("ПОХОДЖЕННЯ") or "")
 
-                if definition_text.strip():
-                    ref_id = lexdb.upsert_reference("ПОКЛИКАННЯ", ref_abbr, ref_title) if (ref_abbr.strip() or ref_title.strip()) else None
-                    definition_id = lexdb.insert_definition(word_id, definition_text, ref_id, int(def_frequency), def_stylistics)
-                    if attach_new_definition and quote_ids:
-                        for qid in quote_ids:
-                            lexdb.link_definition_quote(definition_id, qid)
+        dict_zone_header(2, "Реєстрова зона", "Заповнює таблицю СЛОВО й задає початок майбутньої словникової статті.")
+        reg_box = keyed_container("dict_zone_register")
+        with reg_box:
+            render_zone_box_start()
+            r1, r2 = st.columns([1.2, 1.2])
+            with r1:
+                register = st.text_input("Реєстрова одиниця", value=default_register, key=f"dict_register_full_{current_word_id or 'new'}_{selected_wordform}")
+            with r2:
+                stressed_form = st.text_input("Наголошена форма", value=default_stressed, placeholder="Напр.: боротьбА", key=f"dict_stressed_full_{current_word_id or 'new'}_{selected_wordform}")
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                st.metric("Частота вибраної словоформи", selected_frequency)
+            with m2:
+                st.metric("Частота леми", safe_int(current_word.get("ЧАСТОТА"), 0))
+            with m3:
+                st.metric("ID статті", current_word_id or "ще не створено")
+            if syllable_count(register) > 1 and not has_marked_stress(stressed_form):
+                st.warning("Для понадодноскладового слова введіть наголошену форму з великою наголошеною голосною, напр.: боротьбА.")
+            render_zone_box_end()
 
+        dict_zone_header(3, "Граматико-стилістична й етимологічна зона", "Заповнює частину мови, граматичні ознаки, стилістичні ремарки й етимологічну довідку ‹…›.")
+        gram_box = keyed_container("dict_zone_grammar")
+        with gram_box:
+            render_zone_box_start()
+            g1, g2 = st.columns([0.9, 1.6])
+            with g1:
+                pos = dictionary_option_select("Частина мови", "ЧАСТИНА МОВИ", default_pos, key_prefix=f"dict_pos_full_{current_word_id or 'new'}_{selected_wordform}")
+            with g2:
+                lemma_grammar = grammar_multiselect_for_pos("Граматичні ознаки леми", pos, default_grammar, key_prefix=f"dict_lemma_grammar_full_{current_word_id or 'new'}_{selected_wordform}_{pos}")
+            lemma_stylistics = dictionary_option_multiselect("Стилістичні / функційні ремарки леми", "СТИЛІСТИКА", default_stylistics, key_prefix=f"dict_lemma_styl_full_{current_word_id or 'new'}_{selected_wordform}")
+            origin = st.text_area("Етимологічна довідка / походження / лексикографічний коментар", value=default_origin, height=96, key=f"dict_origin_full_{current_word_id or 'new'}_{selected_wordform}")
+            if st.button("Зберегти реєстрову й граматичну зону", type="primary", key=f"dict_save_word_full_{current_word_id or 'new'}_{selected_wordform}"):
+                if not register.strip():
+                    st.error("Реєстрова одиниця не може бути порожньою.")
+                else:
+                    current_word_id = lexdb.save_word_full(current_word_id, register, stressed_form, 0, pos, lemma_grammar, lemma_stylistics, origin)
+                    lexdb.upsert_wordform(current_word_id, selected_wordform, selected_frequency, pos=pos, grammar="", stylistics="")
+                    lexdb.recompute_word_frequency(current_word_id)
+                    st.success("Реєстрову й граматичну зону збережено.")
+                    fast_rerun()
+            render_zone_box_end()
+
+        if not current_word_id:
+            st.info("Після збереження реєстрової й граматичної зони відкриються всі инші зони словникової статті.")
+            return
+
+        article = cached_lexdb_get_dictionary_article_full(current_word_id)
+        current_word = article.get("word") or {}
+        all_words = cached_lexdb_search_words("", limit=20000)
+
+        dict_zone_header(4, "Варіянти й відсилання", "Формує зони / та → у готовій словниковій статті.")
+        var_box = keyed_container("dict_zone_variants_refs")
+        with var_box:
+            render_zone_box_start()
+            st.markdown("<p class='dict-section-note'>Варіянти вводьте лише тоді, коли вони мають лексикографічне значення. У готовій статті вони будуть подані через /. <strong>Частота варіянта входить до загальної частоти леми.</strong> Якщо до варіянта додати словоформи, частота варіянта автоматично стане сумою частот цих словоформ.</p>", unsafe_allow_html=True)
+            v1, v2, v3 = st.columns([1.1, 1.1, 0.7])
+            with v1:
+                new_variant = st.text_input("Варіянт", placeholder="Напр.: катедра", key=f"dict_variant_value_{current_word_id}")
+                new_variant_stressed = st.text_input("Наголошена форма варіянта", placeholder="Напр.: катЕдра", key=f"dict_variant_stressed_{current_word_id}")
+            with v2:
+                new_variant_type = st.text_input("Тип варіянта", placeholder="правописний, морфологійний, редакційний", key=f"dict_variant_type_{current_word_id}")
+                new_variant_comment = st.text_input("Коментар до варіянта", key=f"dict_variant_comment_{current_word_id}")
+            with v3:
+                new_variant_frequency = st.number_input("Частота варіянта", min_value=0, value=0, step=1, key=f"dict_variant_freq_{current_word_id}")
+                st.caption("Якщо словоформ ще немає, це ручна частота. Після додавання словоформ вона перераховується автоматично.")
+                if st.button("Додати варіянт", key=f"dict_add_variant_{current_word_id}"):
+                    if new_variant.strip():
+                        lexdb.upsert_variant(None, current_word_id, new_variant, new_variant_stressed, new_variant_frequency, new_variant_type, new_variant_comment)
+                        st.success("Варіянт додано. Загальну частоту леми перераховано.")
+                        fast_rerun()
+                    else:
+                        st.error("Варіянт не може бути порожнім.")
+
+            definitions_for_variants = cached_lexdb_list_definitions(current_word_id)
+            variant_def_options = [0] + [int(d["ID"]) for d in definitions_for_variants]
+            variant_def_labels = {int(d["ID"]): f"{i+1}. {str(d.get('ТЛУМАЧЕННЯ') or '')[:80]}" for i, d in enumerate(definitions_for_variants)}
+
+            variants = cached_lexdb_list_variants(current_word_id)
+            if variants:
+                st.markdown(
+                    "<div class='dict-badge-row'>" + "".join(
+                        f"<span class='dict-badge'>/ {html.escape(str(v.get('НАГОЛОШЕНА ФОРМА') or v.get('ВАРІЯНТ')))} ({safe_int(v.get('ЧАСТОТА'),0)})" +
+                        (f" · словоформ: {safe_int(v.get('КІЛЬКІСТЬ_СЛОВОФОРМ'),0)}" if safe_int(v.get('КІЛЬКІСТЬ_СЛОВОФОРМ'),0) else "") +
+                        "</span>" for v in variants
+                    ) + "</div>",
+                    unsafe_allow_html=True,
+                )
+                with st.expander("Редагувати варіянти й словоформи варіянтів", expanded=False):
+                    for v in variants:
+                        st.markdown(f"<div class='dict-mini-card'><strong>/ {html.escape(str(v.get('НАГОЛОШЕНА ФОРМА') or v.get('ВАРІЯНТ')))}</strong> · частота варіянта: <strong>{safe_int(v.get('ЧАСТОТА'), 0)}</strong></div>", unsafe_allow_html=True)
+                        c1, c2, c3, c4 = st.columns([1.15, 1.15, 0.65, 0.45])
+                        with c1:
+                            vv = st.text_input("Варіянт", value=str(v.get("ВАРІЯНТ") or ""), key=f"edit_variant_v_{v['ID']}")
+                            vs = st.text_input("Наголошена форма", value=str(v.get("НАГОЛОШЕНА ФОРМА") or ""), key=f"edit_variant_s_{v['ID']}")
+                        with c2:
+                            vt = st.text_input("Тип", value=str(v.get("ТИП") or ""), key=f"edit_variant_t_{v['ID']}")
+                            vc = st.text_input("Коментар", value=str(v.get("КОМЕНТАР") or ""), key=f"edit_variant_c_{v['ID']}")
+                        with c3:
+                            vf = st.number_input("Частота", min_value=0, value=safe_int(v.get("ЧАСТОТА"), 0), step=1, key=f"edit_variant_f_{v['ID']}")
+                            if safe_int(v.get("КІЛЬКІСТЬ_СЛОВОФОРМ"), 0):
+                                st.caption("Є словоформи: частота обчислюється як їхня сума.")
+                        with c4:
+                            if st.button("💾", key=f"save_variant_{v['ID']}"):
+                                lexdb.upsert_variant(int(v["ID"]), current_word_id, vv, vs, vf, vt, vc)
+                                fast_rerun()
+                            if st.button("🗑", key=f"delete_variant_{v['ID']}"):
+                                lexdb.delete_variant(int(v["ID"]))
+                                fast_rerun()
+
+                        variant_wordforms = cached_lexdb_list_variant_wordforms(int(v["ID"]))
+                        if variant_wordforms:
+                            st.markdown("**Словоформи, зведені до цього варіянта:**")
+                            for vwf in variant_wordforms:
+                                ec1, ec2, ec3, ec4 = st.columns([1.05, 0.55, 1.25, 0.38])
+                                with ec1:
+                                    edit_vwf_value = st.text_input("Словоформа варіянта", value=str(vwf.get("СЛОВОФОРМА") or ""), key=f"edit_vwf_value_{vwf['ID']}")
+                                    edit_vwf_styl = dictionary_option_multiselect("Стилістика", "СТИЛІСТИКА", str(vwf.get("СТИЛІСТИКА") or ""), key_prefix=f"edit_vwf_styl_{vwf['ID']}")
+                                with ec2:
+                                    edit_vwf_freq = st.number_input("Частота", min_value=0, value=safe_int(vwf.get("ЧАСТОТА"), 0), step=1, key=f"edit_vwf_freq_{vwf['ID']}")
+                                with ec3:
+                                    edit_vwf_grammar = grammar_multiselect_for_pos("Граматичні ознаки", pos, str(vwf.get("ГРАМАТИЧНІ ОЗНАКИ") or ""), key_prefix=f"edit_vwf_grammar_{vwf['ID']}_{pos}")
+                                    edit_vwf_def = st.selectbox(
+                                        "Значення",
+                                        variant_def_options,
+                                        index=variant_def_options.index(safe_int(vwf.get("ТЛУМАЧЕННЯ_ID"), 0)) if safe_int(vwf.get("ТЛУМАЧЕННЯ_ID"), 0) in variant_def_options else 0,
+                                        format_func=lambda x: "— не вибрано —" if x == 0 else variant_def_labels.get(int(x), str(x)),
+                                        key=f"edit_vwf_def_{vwf['ID']}",
+                                    )
+                                with ec4:
+                                    if st.button("💾", key=f"save_vwf_{vwf['ID']}"):
+                                        lexdb.upsert_variant_wordform(int(vwf["ID"]), int(v["ID"]), edit_vwf_value, edit_vwf_freq, edit_vwf_grammar, edit_vwf_styl, int(edit_vwf_def) if edit_vwf_def else None)
+                                        st.success("Словоформу варіянта оновлено.")
+                                        fast_rerun()
+                                    if st.button("🗑", key=f"delete_vwf_{vwf['ID']}"):
+                                        lexdb.delete_variant_wordform(int(vwf["ID"]))
+                                        fast_rerun()
+
+                        with st.expander(f"Додати словоформу до варіянта «{str(v.get('ВАРІЯНТ') or '')}»", expanded=False):
+                            av1, av2, av3 = st.columns([1.05, 0.55, 1.35])
+                            with av1:
+                                add_vwf_value = st.text_input("Нова словоформа варіянта", placeholder="Напр.: катедрою, катедри", key=f"add_vwf_value_{v['ID']}")
+                                add_vwf_styl = dictionary_option_multiselect("Стилістика словоформи", "СТИЛІСТИКА", "", key_prefix=f"add_vwf_styl_{v['ID']}")
+                            with av2:
+                                add_vwf_freq = st.number_input("Частота", min_value=0, value=0, step=1, key=f"add_vwf_freq_{v['ID']}")
+                            with av3:
+                                add_vwf_grammar = grammar_multiselect_for_pos("Граматичні ознаки словоформи", pos, "", key_prefix=f"add_vwf_grammar_{v['ID']}_{pos}")
+                                add_vwf_def = st.selectbox(
+                                    "Значення словоформи",
+                                    variant_def_options,
+                                    format_func=lambda x: "— не вибрано —" if x == 0 else variant_def_labels.get(int(x), str(x)),
+                                    key=f"add_vwf_def_{v['ID']}",
+                                )
+                            if st.button("Додати словоформу варіянта й перерахувати частоту", key=f"add_variant_wordform_{v['ID']}"):
+                                if add_vwf_value.strip():
+                                    lexdb.upsert_variant_wordform(None, int(v["ID"]), add_vwf_value, add_vwf_freq, add_vwf_grammar, add_vwf_styl, int(add_vwf_def) if add_vwf_def else None)
+                                    st.success("Словоформу варіянта додано. Частоту варіянта й загальну частоту леми перераховано.")
+                                    fast_rerun()
+                                else:
+                                    st.error("Словоформа варіянта не може бути порожньою.")
+                        st.markdown("---")
+            st.markdown("---")
+            ref1, ref2 = st.columns([1.4, 1])
+            with ref1:
+                ref_text = st.text_input("Відсилання →", placeholder="Напр.: державність; самостійність", key=f"dict_ref_text_{current_word_id}")
+            with ref2:
+                ref_type = st.selectbox("Тип відсилання", ["до основної статті", "до спорідненого слова", "до варіянта", "див. також"], key=f"dict_ref_type_{current_word_id}")
+            target_word = word_id_select("Цільова стаття, якщо вже створена", all_words, key=f"dict_target_word_{current_word_id}")
+            if st.button("Додати відсилання", key=f"dict_add_crossref_{current_word_id}"):
+                if ref_text.strip():
+                    lexdb.upsert_crossref(None, current_word_id, ref_type, ref_text, target_word)
+                    st.success("Відсилання додано.")
+                    fast_rerun()
+            crossrefs = cached_lexdb_list_crossrefs(current_word_id)
+            if crossrefs:
+                with st.expander("Створені відсилання", expanded=False):
+                    for r in crossrefs:
+                        c1, c2, c3 = st.columns([1.6, 0.9, 0.35])
+                        with c1:
+                            rt = st.text_input("Текст", value=str(r.get("ТЕКСТ") or ""), key=f"edit_ref_text_{r['ID']}")
+                        with c2:
+                            rtype = st.text_input("Тип", value=str(r.get("ТИП") or ""), key=f"edit_ref_type_{r['ID']}")
+                        with c3:
+                            if st.button("💾", key=f"save_ref_{r['ID']}"):
+                                lexdb.upsert_crossref(int(r["ID"]), current_word_id, rtype, rt, safe_int(r.get("ЦІЛЬОВЕ_СЛОВО_ID"), 0) or None)
+                                fast_rerun()
+                            if st.button("🗑", key=f"del_ref_{r['ID']}"):
+                                lexdb.delete_crossref(int(r["ID"]))
+                                fast_rerun()
+            render_zone_box_end()
+
+        dict_zone_header(5, "Словоформи й граматична довідка", "Формує зону •: засвідчені словоформи з частотністю, граматикою, стилістикою, значеннями та джерелами.")
+        wf_box = keyed_container("dict_zone_wordforms")
+        with wf_box:
+            render_zone_box_start()
+            definitions_for_wf = cached_lexdb_list_definitions(current_word_id)
+            def_options_wf = [0] + [int(d["ID"]) for d in definitions_for_wf]
+            def_labels_wf = {int(d["ID"]): f"{i + 1}. {str(d.get('ТЛУМАЧЕННЯ') or '')[:75]}" for i, d in enumerate(definitions_for_wf)}
+
+            st.markdown(
+                "<p class='dict-section-note'>Однакова словоформа може бути внесена кілька разів, якщо вона має инші граматичні ознаки, стилістичні ремарки або належить до иншого значення. Наприклад: <strong>офензива</strong> — <em>військ.</em> і <em>перен.</em>.</p>",
+                unsafe_allow_html=True,
+            )
+            wf_existing = cached_lexdb_get_wordform(current_word_id, selected_wordform) if selected_wordform else None
+            wf1, wf2, wf3 = st.columns([1.05, 0.6, 1.25])
+            with wf1:
+                wf_value = st.text_input("Словоформа", value=selected_wordform or "", key=f"dict_wf_value_{current_word_id}")
+            with wf2:
+                wf_frequency = st.number_input("Частота цієї реалізації", min_value=0, value=safe_int((wf_existing or {}).get("ЧАСТОТА"), selected_frequency), step=1, key=f"dict_wf_freq_{current_word_id}")
+            with wf3:
+                wf_definition_id = st.selectbox(
+                    "Значення словоформи",
+                    def_options_wf,
+                    format_func=lambda x: "— не прив’язано до значення —" if x == 0 else def_labels_wf.get(int(x), str(x)),
+                    key=f"dict_wf_def_{current_word_id}",
+                )
+            wf_grammar = grammar_multiselect_for_pos(
+                "Граматичні ознаки цієї словоформи",
+                pos,
+                str((wf_existing or {}).get("ГРАМАТИЧНІ ОЗНАКИ") or ""),
+                key_prefix=f"dict_wf_grammar_{current_word_id}_{pos}",
+            )
+            wf_stylistics = dictionary_option_multiselect(
+                "Стилістичні ремарки цієї словоформи",
+                "СТИЛІСТИКА",
+                str((wf_existing or {}).get("СТИЛІСТИКА") or ""),
+                key_prefix=f"dict_wf_styl_{current_word_id}",
+            )
+            if st.button("Додати окрему реалізацію словоформи", key=f"dict_save_wordform_{current_word_id}"):
+                if wf_value.strip():
+                    lexdb.upsert_wordform(
+                        current_word_id,
+                        wf_value.strip(),
+                        int(wf_frequency),
+                        pos=pos,
+                        grammar=wf_grammar,
+                        stylistics=wf_stylistics,
+                        definition_id=int(wf_definition_id) if wf_definition_id else None,
+                    )
+                    lexdb.recompute_word_frequency(current_word_id)
+                    st.success("Словоформу збережено як окрему реалізацію.")
+                    fast_rerun()
+                else:
+                    st.error("Словоформа не може бути порожньою.")
+
+            wordforms_existing = cached_lexdb_list_wordforms_for_word(current_word_id)
+            if wordforms_existing:
+                st.markdown(
+                    "<div class='dict-badge-row'>" + "".join(
+                        f"<span class='dict-badge'>• {html.escape(str(w.get('СЛОВОФОРМА')))} · {html.escape(str(w.get('ГРАМАТИЧНІ ОЗНАКИ') or '—'))} · {html.escape(str(w.get('СТИЛІСТИКА') or '—'))} · знач. {def_labels_wf.get(safe_int(w.get('ТЛУМАЧЕННЯ_ID'), 0), '—')} · {safe_int(w.get('ЧАСТОТА'),0)}</span>"
+                        for w in wordforms_existing
+                    ) + "</div>",
+                    unsafe_allow_html=True,
+                )
+                with st.expander("Редагувати словоформи, граматику, стилістику й значення", expanded=False):
+                    for wf in wordforms_existing:
+                        st.markdown(f"<div class='dict-mini-card'><strong>{html.escape(str(wf.get('СЛОВОФОРМА') or ''))}</strong> · ID {safe_int(wf.get('ID'),0)}</div>", unsafe_allow_html=True)
+                        c1, c2, c3 = st.columns([1.0, 0.55, 1.15])
+                        with c1:
+                            wfv = st.text_input("Словоформа", value=str(wf.get("СЛОВОФОРМА") or ""), key=f"edit_wf_value_{wf['ID']}")
+                        with c2:
+                            wff = st.number_input("Частота", min_value=0, value=safe_int(wf.get("ЧАСТОТА"), 0), step=1, key=f"edit_wf_freq_{wf['ID']}")
+                        with c3:
+                            wf_def_edit = st.selectbox(
+                                "Значення",
+                                def_options_wf,
+                                index=def_options_wf.index(safe_int(wf.get("ТЛУМАЧЕННЯ_ID"), 0)) if safe_int(wf.get("ТЛУМАЧЕННЯ_ID"), 0) in def_options_wf else 0,
+                                format_func=lambda x: "— не прив’язано —" if x == 0 else def_labels_wf.get(int(x), str(x)),
+                                key=f"edit_wf_def_{wf['ID']}",
+                            )
+                        wfg = grammar_multiselect_for_pos(
+                            "Граматичні ознаки",
+                            pos,
+                            str(wf.get("ГРАМАТИЧНІ ОЗНАКИ") or ""),
+                            key_prefix=f"edit_wf_grammar_{wf['ID']}_{pos}",
+                        )
+                        wfs = dictionary_option_multiselect(
+                            "Стилістичні ремарки",
+                            "СТИЛІСТИКА",
+                            str(wf.get("СТИЛІСТИКА") or ""),
+                            key_prefix=f"edit_wf_styl_{wf['ID']}",
+                        )
+                        b1, b2 = st.columns([1, 1])
+                        with b1:
+                            if st.button("Зберегти цю словоформу", key=f"save_wf_{wf['ID']}"):
+                                lexdb.update_wordform(
+                                    int(wf["ID"]),
+                                    wfv,
+                                    wff,
+                                    pos=str(wf.get("ЧАСТИНА МОВИ") or pos),
+                                    grammar=wfg,
+                                    stylistics=wfs,
+                                    definition_id=int(wf_def_edit) if wf_def_edit else None,
+                                )
+                                st.success("Словоформу оновлено.")
+                                fast_rerun()
+                        with b2:
+                            if st.button("Видалити цю словоформу", key=f"del_wf_{wf['ID']}"):
+                                lexdb.delete_wordform(int(wf["ID"]))
+                                fast_rerun()
+            render_zone_box_end()
+
+        dict_zone_header(6, "Семантична зона: значення й підзначення", "Заповнює таблиці ТЛУМАЧЕННЯ, ПОКЛИКАННЯ та ПІДЗНАЧЕННЯ.")
+        sem_box = keyed_container("dict_zone_definitions")
+        with sem_box:
+            render_zone_box_start()
+            definitions = cached_lexdb_list_definitions(current_word_id)
+            if definitions:
+                st.markdown("<p class='dict-section-note'>Редагуйте значення окремо. Підзначення будуть виведені після //.</p>", unsafe_allow_html=True)
+                for i, d in enumerate(definitions, start=1):
+                    with st.expander(f"Значення {i}: {str(d.get('ТЛУМАЧЕННЯ') or '')[:90]}", expanded=False):
+                        dt = st.text_area("Текст тлумачення", value=str(d.get("ТЛУМАЧЕННЯ") or ""), height=90, key=f"edit_def_text_{d['ID']}")
+                        dc1, dc2, dc3 = st.columns([0.75, 1.1, 0.8])
+                        with dc1:
+                            dfreq = st.number_input("Частота значення (автоматично за кількістю ілюстрацій)", min_value=0, value=safe_int(d.get("ЧАСТОТА"), 0), step=1, disabled=True, key=f"edit_def_freq_{d['ID']}")
+                        with dc2:
+                            dstyl = dictionary_option_multiselect("Стилістика значення", "СТИЛІСТИКА", str(d.get("СТИЛІСТИКА") or ""), key_prefix=f"edit_def_styl_{d['ID']}")
+                        with dc3:
+                            dref = reference_select("Покликання", "ПОКЛИКАННЯ", key=f"edit_def_ref_{d['ID']}", default_id=safe_int(d.get("ПОКЛИКАННЯ_ID"), 0) or None)
+                        b1, b2 = st.columns([1, 1])
+                        with b1:
+                            if st.button("Зберегти значення", key=f"save_def_{d['ID']}"):
+                                lexdb.update_definition(int(d["ID"]), dt, dref, dfreq, dstyl)
+                                st.success("Значення оновлено.")
+                                fast_rerun()
+                        with b2:
+                            if st.button("Видалити значення", key=f"delete_def_{d['ID']}"):
+                                lexdb.delete_definition(int(d["ID"]))
+                                fast_rerun()
+                        subs = cached_lexdb_list_subdefinitions(int(d["ID"]))
+                        if subs:
+                            st.markdown("**Підзначення:**")
+                            for sub in subs:
+                                sc1, sc2 = st.columns([1.7, 0.3])
+                                with sc1:
+                                    st.markdown(f"<div class='dict-mini-card'>// {html.escape(str(sub.get('ТЕКСТ') or ''))} ({safe_int(sub.get('ЧАСТОТА'),0)}) {html.escape(str(sub.get('СТИЛІСТИКА') or ''))}</div>", unsafe_allow_html=True)
+                                with sc2:
+                                    if st.button("🗑", key=f"del_sub_{sub['ID']}"):
+                                        lexdb.delete_subdefinition(int(sub["ID"]))
+                                        fast_rerun()
+                        sub_text = st.text_input("Нове підзначення //", key=f"new_sub_text_{d['ID']}")
+                        sc1, sc2 = st.columns([0.6, 1.4])
+                        with sc1:
+                            sub_freq = st.number_input("Частота підзначення", min_value=0, value=0, step=1, key=f"new_sub_freq_{d['ID']}")
+                        with sc2:
+                            sub_styl = dictionary_option_multiselect("Стилістика підзначення", "СТИЛІСТИКА", "", key_prefix=f"new_sub_styl_{d['ID']}")
+                        if st.button("Додати підзначення", key=f"add_sub_{d['ID']}"):
+                            if sub_text.strip():
+                                lexdb.upsert_subdefinition(None, int(d["ID"]), sub_text, sub_freq, sub_styl)
+                                fast_rerun()
+            st.markdown("#### Додати нове значення")
+            new_def_text = st.text_area("Тлумачення / функційне пояснення", height=110, key=f"new_def_text_{current_word_id}")
+            nd1, nd2, nd3 = st.columns([0.65, 1.15, 0.9])
+            with nd1:
+                new_def_freq = st.number_input("Частота значення (автоматично після прикріплення ілюстрацій)", min_value=0, value=0, step=1, disabled=True, key=f"new_def_freq_{current_word_id}")
+            with nd2:
+                new_def_styl = dictionary_option_multiselect("Стилістика значення", "СТИЛІСТИКА", "", key_prefix=f"new_def_styl_{current_word_id}")
+            with nd3:
+                new_def_ref = reference_select("Покликання", "ПОКЛИКАННЯ", key=f"new_def_ref_{current_word_id}")
+            with st.expander("Додати / редагувати покликання для тлумачень", expanded=False):
+                ref_abbr = st.text_input("Скорочення покликання", placeholder="Напр.: СУМ-11", key=f"new_ref_abbr_{current_word_id}")
+                ref_full = st.text_input("Повна назва покликання", key=f"new_ref_full_{current_word_id}")
+                if st.button("Зберегти покликання", key=f"save_new_ref_{current_word_id}"):
+                    if ref_abbr.strip() or ref_full.strip():
+                        lexdb.upsert_reference("ПОКЛИКАННЯ", ref_abbr, ref_full)
+                        st.success("Покликання додано.")
+                        fast_rerun()
+                for ref_item in cached_lexdb_list_references("ПОКЛИКАННЯ")[:80]:
+                    pc1, pc2, pc3 = st.columns([0.7, 1.7, 0.35])
+                    with pc1:
+                        pa = st.text_input("Скорочення", value=str(ref_item.get("СКОРОЧЕННЯ") or ""), key=f"edit_ref_abbr_full_{ref_item['ID']}")
+                    with pc2:
+                        pf = st.text_input("Повна назва", value=str(ref_item.get("ПОВНА НАЗВА") or ""), key=f"edit_ref_full_full_{ref_item['ID']}")
+                    with pc3:
+                        if st.button("💾", key=f"save_ref_full_{ref_item['ID']}"):
+                            lexdb.update_reference("ПОКЛИКАННЯ", int(ref_item["ID"]), pa, pf)
+                            fast_rerun()
+            if st.button("Додати значення", key=f"add_def_{current_word_id}"):
+                if new_def_text.strip():
+                    lexdb.insert_definition(current_word_id, new_def_text, new_def_ref, new_def_freq, new_def_styl)
+                    st.success("Значення додано.")
+                    fast_rerun()
+                else:
+                    st.error("Тлумачення не може бути порожнім.")
+            render_zone_box_end()
+
+        dict_zone_header(7, "Ілюстративна й редакційна зона", "Добір, редагування й паспортизація цитат: ПЕРШОДРУК, ПЕРЕДРУК ПУР-1978, ДЖЕРЕЛО та зв’язки з таблицями.")
+        quote_box = keyed_container("dict_zone_quotes")
+        with quote_box:
+            render_zone_box_start()
+            definitions = cached_lexdb_list_definitions(current_word_id)
+            collocations = cached_lexdb_list_collocations(current_word_id)
+            wordforms_existing = cached_lexdb_list_wordforms_for_word(current_word_id)
+            target_def_options = [0] + [int(d["ID"]) for d in definitions]
+            target_def_labels = {int(d["ID"]): f"{i+1}. {str(d.get('ТЛУМАЧЕННЯ') or '')[:75]}" for i, d in enumerate(definitions)}
+            target_coll_options = [0] + [int(c["ID"]) for c in collocations]
+            target_coll_labels = {int(c["ID"]): str(c.get("ОДИНИЦЯ") or c.get("ID")) for c in collocations}
+            target_wf_options = [0] + [int(w["ID"]) for w in wordforms_existing]
+            target_wf_labels = {int(w["ID"]): f"{w.get('СЛОВОФОРМА')} · {w.get('ГРАМАТИЧНІ ОЗНАКИ') or '—'} · знач. {target_def_labels.get(safe_int(w.get('ТЛУМАЧЕННЯ_ID'),0), '—')} ({safe_int(w.get('ЧАСТОТА'),0)})" for w in wordforms_existing}
+
+            st.markdown("#### Добір із конкордансу")
+            qc1, qc2, qc3, qc4 = st.columns([1.2, 0.75, 1.0, 0.9])
+            with qc1:
+                dict_mode = st.selectbox("Режим контексту", ["Реченнєвий контекст", "Контекст фіксованої глибини"], index=0, key=f"dict_context_mode_full_{current_word_id}_{selected_wordform}")
+            with qc2:
+                if dict_mode == "Контекст фіксованої глибини":
+                    dict_depth = st.number_input("Глибина", min_value=1, max_value=50, value=7, step=1, key=f"dict_context_depth_full_{current_word_id}_{selected_wordform}")
+                else:
+                    dict_depth = 7
+            with qc3:
+                dict_variants_choice = st.selectbox("Варіянти в конкордансі", ["Показувати", "Не показувати"], index=0, key=f"dict_context_variants_full_{current_word_id}_{selected_wordform}")
+            with qc4:
+                context_limit = st.number_input("Кількість контекстів", min_value=10, max_value=1000, value=80, step=10, key=f"dict_context_limit_full_{current_word_id}_{selected_wordform}")
+            found_wordforms = get_wordforms_for_queries([selected_wordform], dict_variants_choice == "Показувати", wordforms_df) or [selected_wordform]
+            available_codes_df = fetch_available_codes(STAMP, tuple(found_wordforms))
+            code_options = available_codes_df["code"].tolist() if not available_codes_df.empty else []
+            code_labels = {row.code: f"{row.code} — {row.title} ({int(row.hits)})" for row in available_codes_df.itertuples(index=False)}
+            selected_codes = st.multiselect("Фільтр за кодом статті", options=code_options, default=[], format_func=lambda c: code_labels.get(c, c), key=f"dict_context_codes_full_{current_word_id}_{selected_wordform}")
+            total_hits = count_contexts(STAMP, tuple(found_wordforms), tuple(selected_codes))
+            header = format_register_header(found_wordforms, wordforms_df, dict_variants_choice == "Показувати")
+            st.markdown(render_register_card(header, total_hits, len(available_codes_df), dict_mode, int(dict_depth)), unsafe_allow_html=True)
+            ctx_df = fetch_contexts(STAMP, tuple(found_wordforms), dict_mode, int(dict_depth), tuple(selected_codes), int(context_limit))
+            selected_contexts = pd.DataFrame() if ctx_df.empty else render_context_selector(ctx_df, selected_wordform)
+            if ctx_df.empty:
+                st.info("Для цієї словоформи немає контекстів.")
+
+            edited_contexts: list[dict] = []
+            if not selected_contexts.empty:
+                with st.expander("Редагувати вибрані ілюстрації перед збереженням", expanded=True):
+                    st.caption("Тут можна скоротити цитату через […], виправити межі контексту, указати PRG/SRG, вибрати джерело першодруку й додати передрук ПУР-1978.")
+                    for local_i, (_, row) in enumerate(selected_contexts.iterrows(), start=1):
+                        default_first = context_row_to_quote(row)
+                        st.markdown(f"<div class='dict-mini-card'><strong>Ілюстрація {local_i}</strong> · {html.escape(str(row.get('code', '')))} · {html.escape(str(row.get('article_title', '')))}</div>", unsafe_allow_html=True)
+                        ec1, ec2, ec3 = st.columns([0.45, 0.45, 1.25])
+                        with ec1:
+                            e_prg = st.number_input("PRG / позиція", min_value=0, value=safe_int(row.get("token_index"), 0), step=1, key=f"edit_ctx_prg_{current_word_id}_{local_i}_{safe_int(row.get('token_index'),0)}")
+                        with ec2:
+                            e_srg = st.number_input("SRG / сегмент", min_value=0, value=0, step=1, key=f"edit_ctx_srg_{current_word_id}_{local_i}_{safe_int(row.get('token_index'),0)}")
+                        with ec3:
+                            e_source = reference_select("Джерело першодруку", "ДЖЕРЕЛО", key=f"edit_ctx_source_{current_word_id}_{local_i}_{safe_int(row.get('token_index'),0)}")
+                        e_first = st.text_area("Текст першодруку", value=default_first, height=88, key=f"edit_ctx_first_{current_word_id}_{local_i}_{safe_int(row.get('token_index'),0)}")
+                        e_reprint = st.text_area("Передрук ПУР-1978 / редакційна відмінність ↕", value="", height=72, key=f"edit_ctx_reprint_{current_word_id}_{local_i}_{safe_int(row.get('token_index'),0)}")
+                        edited_contexts.append({
+                            "prg": int(e_prg) if e_prg else None,
+                            "srg": int(e_srg) if e_srg else None,
+                            "firstprint": e_first,
+                            "reprint": e_reprint,
+                            "source_id": e_source,
+                            "code": str(row.get("code", "")),
+                            "article_title": str(row.get("article_title", "")),
+                        })
+
+            at1, at2, at3 = st.columns([1.1, 1.1, 1.1])
+            with at1:
+                attach_wf_id = st.selectbox("Прикріпити до словоформи", target_wf_options, format_func=lambda x: "— не вибрано —" if x == 0 else target_wf_labels.get(int(x), str(x)), key=f"attach_wf_context_{current_word_id}")
+            with at2:
+                attach_def_id = st.selectbox("Прикріпити до значення", target_def_options, format_func=lambda x: "— не вибрано —" if x == 0 else target_def_labels.get(int(x), str(x)), key=f"attach_def_context_{current_word_id}")
+            with at3:
+                attach_coll_id = st.selectbox("Прикріпити до сталої сполуки", target_coll_options, format_func=lambda x: "— не вибрано —" if x == 0 else target_coll_labels.get(int(x), str(x)), key=f"attach_coll_context_{current_word_id}")
+            if st.button("Зберегти вибрані / відредаговані контексти як цитати", key=f"save_context_quotes_{current_word_id}_{selected_wordform}"):
+                if not edited_contexts:
+                    st.error("Не вибрано жодного контексту.")
+                else:
+                    saved = 0
+                    for item in edited_contexts:
+                        source_id = item.get("source_id") or lexdb.upsert_reference("ДЖЕРЕЛО", str(item.get("code", "")), str(item.get("article_title", "")))
+                        quote_id = lexdb.upsert_quote(prg=item.get("prg"), srg=item.get("srg"), firstprint=str(item.get("firstprint") or ""), reprint=str(item.get("reprint") or ""), source_id=source_id)
+                        if attach_wf_id:
+                            lexdb.link_wordform_quote(int(attach_wf_id), quote_id)
+                        if attach_def_id:
+                            lexdb.link_definition_quote(int(attach_def_id), quote_id)
+                        if attach_coll_id:
+                            lexdb.link_collocation_quote(int(attach_coll_id), quote_id)
+                        saved += 1
+                    st.success(f"Збережено цитат: {saved}.")
+                    fast_rerun()
+
+            st.markdown("---")
+            st.markdown("#### Додати цитату вручну / редакційне зіставлення")
+            mq1, mq2, mq3 = st.columns([0.55, 0.55, 1.3])
+            with mq1:
+                manual_prg = st.number_input("PRG / позиція", min_value=0, value=0, step=1, key=f"manual_prg_{current_word_id}")
+            with mq2:
+                manual_srg = st.number_input("SRG / сегмент", min_value=0, value=0, step=1, key=f"manual_srg_{current_word_id}")
+            with mq3:
+                manual_source_id = reference_select("Вибрати першодрук / джерело першодруку", "ДЖЕРЕЛО", key=f"manual_source_{current_word_id}")
+            manual_first = st.text_area("Першодрук", height=90, key=f"manual_first_{current_word_id}")
+            manual_reprint = st.text_area("Передрук ПУР-1978 / редакційна відмінність ↕", height=80, key=f"manual_reprint_{current_word_id}")
+            ma1, ma2, ma3 = st.columns([1, 1, 1])
+            with ma1:
+                manual_wf_id = st.selectbox("Зв’язати зі словоформою", target_wf_options, format_func=lambda x: "— не вибрано —" if x == 0 else target_wf_labels.get(int(x), str(x)), key=f"manual_wf_{current_word_id}")
+            with ma2:
+                manual_def_id = st.selectbox("Зв’язати зі значенням", target_def_options, format_func=lambda x: "— не вибрано —" if x == 0 else target_def_labels.get(int(x), str(x)), key=f"manual_def_{current_word_id}")
+            with ma3:
+                manual_coll_id = st.selectbox("Зв’язати зі сполукою", target_coll_options, format_func=lambda x: "— не вибрано —" if x == 0 else target_coll_labels.get(int(x), str(x)), key=f"manual_coll_{current_word_id}")
+            with st.expander("Додати / редагувати джерела першодруків", expanded=False):
+                src_abbr = st.text_input("Скорочення джерела", key=f"new_source_abbr_{current_word_id}")
+                src_full = st.text_input("Повна назва джерела", key=f"new_source_full_{current_word_id}")
+                if st.button("Зберегти джерело", key=f"save_new_source_{current_word_id}"):
+                    if src_abbr.strip() or src_full.strip():
+                        lexdb.upsert_reference("ДЖЕРЕЛО", src_abbr, src_full)
+                        st.success("Джерело додано.")
+                        fast_rerun()
+                for src in cached_lexdb_list_references("ДЖЕРЕЛО")[:80]:
+                    sc1, sc2, sc3 = st.columns([0.7, 1.7, 0.35])
+                    with sc1:
+                        ea = st.text_input("Скорочення", value=str(src.get("СКОРОЧЕННЯ") or ""), key=f"edit_src_abbr_{src['ID']}")
+                    with sc2:
+                        ef = st.text_input("Повна назва", value=str(src.get("ПОВНА НАЗВА") or ""), key=f"edit_src_full_{src['ID']}")
+                    with sc3:
+                        if st.button("💾", key=f"save_src_{src['ID']}"):
+                            lexdb.update_reference("ДЖЕРЕЛО", int(src["ID"]), ea, ef)
+                            fast_rerun()
+            if st.button("Додати цитату вручну", key=f"add_manual_quote_{current_word_id}"):
+                if not manual_first.strip():
+                    st.error("Текст першодруку не може бути порожнім.")
+                else:
+                    qid = lexdb.upsert_quote(manual_prg if manual_prg else None, manual_srg if manual_srg else None, manual_first, manual_reprint, manual_source_id)
+                    if manual_wf_id:
+                        lexdb.link_wordform_quote(int(manual_wf_id), qid)
+                    if manual_def_id:
+                        lexdb.link_definition_quote(int(manual_def_id), qid)
+                    if manual_coll_id:
+                        lexdb.link_collocation_quote(int(manual_coll_id), qid)
+                    st.success("Цитату додано.")
+                    fast_rerun()
+
+            article_for_quotes = cached_lexdb_get_dictionary_article_full(current_word_id)
+            existing_quotes = article_for_quotes.get("all_quotes") or []
+            if existing_quotes:
+                with st.expander("Редагувати вже збережені ілюстрації", expanded=False):
+                    for q in existing_quotes:
+                        with st.expander(f"Цитата ID {q.get('ID')} · {format_source_label(q)}", expanded=False):
+                            attachments = cached_lexdb_get_quote_attachments(int(q["ID"]))
+                            if attachments:
+                                st.markdown("**Позиція цієї ілюстрації у статті:**")
+                                kind_labels = {"definition": "значення", "wordform": "словоформи", "collocation": "сталої сполуки"}
+                                for att in attachments:
+                                    ac1, ac2, ac3, ac4 = st.columns([1.65, 0.42, 0.42, 0.9])
+                                    with ac1:
+                                        st.markdown(
+                                            f"<div class='dict-mini-card'><strong>{html.escape(kind_labels.get(str(att.get('KIND')), str(att.get('KIND'))))}</strong>: "
+                                            f"{html.escape(str(att.get('LABEL') or ''))} · позиція {safe_int(att.get('ПОРЯДОК'), 0) or '—'}</div>",
+                                            unsafe_allow_html=True,
+                                        )
+                                    with ac2:
+                                        if st.button("↑", key=f"quote_up_{att.get('KIND')}_{att.get('OWNER_ID')}_{q['ID']}"):
+                                            lexdb.move_quote_link(str(att.get("KIND")), int(att.get("OWNER_ID")), int(q["ID"]), "up")
+                                            fast_rerun()
+                                    with ac3:
+                                        if st.button("↓", key=f"quote_down_{att.get('KIND')}_{att.get('OWNER_ID')}_{q['ID']}"):
+                                            lexdb.move_quote_link(str(att.get("KIND")), int(att.get("OWNER_ID")), int(q["ID"]), "down")
+                                            fast_rerun()
+                                    with ac4:
+                                        if st.button("Упорядкувати", key=f"quote_norm_{att.get('KIND')}_{att.get('OWNER_ID')}_{q['ID']}"):
+                                            lexdb.normalize_quote_order(str(att.get("KIND")), int(att.get("OWNER_ID")))
+                                            fast_rerun()
+                            else:
+                                st.caption("Цитата ще не має активного прикріплення до словоформи, значення або сталої сполуки.")
+                            eq1, eq2, eq3 = st.columns([0.45, 0.45, 1.2])
+                            with eq1:
+                                q_prg = st.number_input("PRG / позиція", min_value=0, value=safe_int(q.get("PRG"), 0), step=1, key=f"q_prg_{q['ID']}")
+                            with eq2:
+                                q_srg = st.number_input("SRG / сегмент", min_value=0, value=safe_int(q.get("SRG"), 0), step=1, key=f"q_srg_{q['ID']}")
+                            with eq3:
+                                q_source = reference_select("Джерело першодруку", "ДЖЕРЕЛО", key=f"q_source_{q['ID']}", default_id=safe_int(q.get("ДЖЕРЕЛО_ID"), 0) or None)
+                            q_first = st.text_area("Першодрук", value=str(q.get("ПЕРШОДРУК") or ""), height=88, key=f"q_first_{q['ID']}")
+                            q_reprint = st.text_area("Передрук ПУР-1978", value=str(q.get("ПЕРЕДРУК") or ""), height=72, key=f"q_reprint_{q['ID']}")
+                            add1, add2, add3 = st.columns([1, 1, 1])
+                            with add1:
+                                q_add_wf = st.selectbox("Додатково прикріпити до словоформи", target_wf_options, format_func=lambda x: "— не вибрано —" if x == 0 else target_wf_labels.get(int(x), str(x)), key=f"q_add_wf_{q['ID']}")
+                            with add2:
+                                q_add_def = st.selectbox("Додатково прикріпити до значення", target_def_options, format_func=lambda x: "— не вибрано —" if x == 0 else target_def_labels.get(int(x), str(x)), key=f"q_add_def_{q['ID']}")
+                            with add3:
+                                q_add_coll = st.selectbox("Додатково прикріпити до сполуки", target_coll_options, format_func=lambda x: "— не вибрано —" if x == 0 else target_coll_labels.get(int(x), str(x)), key=f"q_add_coll_{q['ID']}")
+                            qb1, qb2 = st.columns([1, 1])
+                            with qb1:
+                                if st.button("Зберегти цитату", key=f"save_quote_{q['ID']}"):
+                                    lexdb.update_quote(int(q["ID"]), q_prg if q_prg else None, q_srg if q_srg else None, q_first, q_reprint, q_source)
+                                    if q_add_wf:
+                                        lexdb.link_wordform_quote(int(q_add_wf), int(q["ID"]))
+                                    if q_add_def:
+                                        lexdb.link_definition_quote(int(q_add_def), int(q["ID"]))
+                                    if q_add_coll:
+                                        lexdb.link_collocation_quote(int(q_add_coll), int(q["ID"]))
+                                    st.success("Цитату оновлено.")
+                                    fast_rerun()
+                            with qb2:
+                                if st.button("Видалити цитату", key=f"delete_quote_{q['ID']}"):
+                                    lexdb.delete_quote(int(q["ID"]))
+                                    fast_rerun()
+            render_zone_box_end()
+
+        dict_zone_header(8, "Фразеологічно-сполучувальна зона", "Формує зону ♦: сталі словосполуки, політичні формули, фразеологізми, термінологізовані сполуки.")
+        coll_box = keyed_container("dict_zone_collocations")
+        with coll_box:
+            render_zone_box_start()
+            collocations = cached_lexdb_list_collocations(current_word_id)
+            if collocations:
+                for c in collocations:
+                    with st.expander(f"♦ {c.get('ОДИНИЦЯ')}", expanded=False):
+                        cu = st.text_input("Одиниця", value=str(c.get("ОДИНИЦЯ") or ""), key=f"edit_coll_unit_{c['ID']}")
+                        ct = dictionary_option_select("Тип одиниці", "ТИП СТІЙКОЇ СПОЛУКИ", str(c.get("ТИП") or ""), key_prefix=f"edit_coll_type_{c['ID']}")
+                        cd = st.text_area("Тлумачення сполуки", value=str(c.get("ТЛУМАЧЕННЯ") or ""), height=80, key=f"edit_coll_def_{c['ID']}")
+                        cc1, cc2 = st.columns([0.6, 1.4])
+                        with cc1:
+                            cf = st.number_input("Частота", min_value=0, value=safe_int(c.get("ЧАСТОТА"), 0), step=1, key=f"edit_coll_freq_{c['ID']}")
+                        with cc2:
+                            cs = dictionary_option_multiselect("Стилістика сполуки", "СТИЛІСТИКА", str(c.get("СТИЛІСТИКА") or ""), key_prefix=f"edit_coll_styl_{c['ID']}")
+                        cb1, cb2 = st.columns([1, 1])
+                        with cb1:
+                            if st.button("Зберегти сполуку", key=f"save_coll_{c['ID']}"):
+                                lexdb.update_collocation(int(c["ID"]), cu, ct, cd, cf, cs)
+                                fast_rerun()
+                        with cb2:
+                            if st.button("Видалити сполуку", key=f"del_coll_{c['ID']}"):
+                                lexdb.delete_collocation(int(c["ID"]))
+                                fast_rerun()
+            st.markdown("#### Додати нову сталу сполуку")
+            unit = st.text_input("Одиниця", placeholder="Наприклад: визвольна боротьба", key=f"new_coll_unit_{current_word_id}")
+            unit_type = dictionary_option_select("Тип одиниці", "ТИП СТІЙКОЇ СПОЛУКИ", "", key_prefix=f"new_coll_type_{current_word_id}")
+            coll_definition = st.text_area("Тлумачення сполуки / фразеологізму", height=90, key=f"new_coll_definition_{current_word_id}")
+            nc1, nc2 = st.columns([0.55, 1.45])
+            with nc1:
+                coll_frequency = st.number_input("Частота сполуки", min_value=0, value=0, step=1, key=f"new_coll_freq_{current_word_id}")
+            with nc2:
+                coll_stylistics = dictionary_option_multiselect("Стилістика сполуки", "СТИЛІСТИКА", "", key_prefix=f"new_coll_styl_{current_word_id}")
+            if st.button("Додати сталу сполуку", key=f"add_collocation_{current_word_id}"):
                 if unit.strip():
-                    collocation_id = lexdb.insert_collocation(word_id, unit, unit_type, coll_definition, int(coll_frequency), coll_stylistics)
-                    if attach_coll_quotes and quote_ids:
-                        for qid in quote_ids:
-                            lexdb.link_collocation_quote(collocation_id, qid)
+                    lexdb.insert_collocation(current_word_id, unit, unit_type, coll_definition, int(coll_frequency), coll_stylistics)
+                    st.success("Сталу сполуку додано.")
+                    fast_rerun()
+                else:
+                    st.error("Одиниця сталої сполуки не може бути порожньою.")
+            render_zone_box_end()
 
-                st.success("Картку збережено: лему, словоформу, граматичну зону, вибрані цитати, тлумачення й сталі сполуки оновлено відповідно до заповнених полів.")
-                st.rerun()
+        dict_zone_header(9, "Семантичні зв’язки", "Формує зони = та ≠: авторські синоніми, антоніми й споріднені одиниці.")
+        rel_box = keyed_container("dict_zone_relations")
+        with rel_box:
+            render_zone_box_start()
+            rel1, rel2 = st.columns([0.75, 1.4])
+            with rel1:
+                rel_type = st.selectbox("Тип зв’язку", ["синонім", "антонім", "споріднена одиниця"], key=f"new_rel_type_{current_word_id}")
+            with rel2:
+                rel_unit = st.text_input("Одиниця", placeholder="Напр.: самостійність", key=f"new_rel_unit_{current_word_id}")
+            related_id = word_id_select("Пов’язана стаття, якщо вже створена", all_words, key=f"new_rel_related_{current_word_id}")
+            rel_comment = st.text_input("Коментар до зв’язку", key=f"new_rel_comment_{current_word_id}")
+            if st.button("Додати семантичний зв’язок", key=f"add_relation_{current_word_id}"):
+                if rel_unit.strip():
+                    lexdb.upsert_semantic_relation(None, current_word_id, rel_type, rel_unit, related_id, rel_comment)
+                    st.success("Семантичний зв’язок додано.")
+                    fast_rerun()
+            relations = cached_lexdb_list_semantic_relations(current_word_id)
+            if relations:
+                st.markdown("<div class='dict-badge-row'>" + "".join(f"<span class='dict-badge'>{'=' if r.get('ТИП')=='синонім' else '≠' if r.get('ТИП')=='антонім' else '→'} {html.escape(str(r.get('ОДИНИЦЯ')))}</span>" for r in relations) + "</div>", unsafe_allow_html=True)
+                with st.expander("Редагувати / вилучити семантичні зв’язки", expanded=False):
+                    for r in relations:
+                        rc1, rc2, rc3 = st.columns([0.7, 1.2, 0.35])
+                        with rc1:
+                            rt = st.selectbox("Тип", ["синонім", "антонім", "споріднена одиниця"], index=["синонім", "антонім", "споріднена одиниця"].index(str(r.get("ТИП") or "синонім")) if str(r.get("ТИП") or "") in ["синонім", "антонім", "споріднена одиниця"] else 0, key=f"edit_rel_type_{r['ID']}")
+                        with rc2:
+                            ru = st.text_input("Одиниця", value=str(r.get("ОДИНИЦЯ") or ""), key=f"edit_rel_unit_{r['ID']}")
+                        with rc3:
+                            if st.button("💾", key=f"save_rel_{r['ID']}"):
+                                lexdb.upsert_semantic_relation(int(r["ID"]), current_word_id, rt, ru, safe_int(r.get("ПОВЯЗАНЕ_СЛОВО_ID"), 0) or None, str(r.get("КОМЕНТАР") or ""))
+                                fast_rerun()
+                            if st.button("🗑", key=f"del_rel_{r['ID']}"):
+                                lexdb.delete_semantic_relation(int(r["ID"]))
+                                fast_rerun()
+            render_zone_box_end()
 
-        if current_word_id:
-            render_existing_dictionary_article(current_word_id)
+        article = cached_lexdb_get_dictionary_article_full(current_word_id)
+        dict_zone_header(10, "Попередній перегляд і контроль повноти", "Автоматично формує словникову статтю з позначками /, →, ↕, ♦, •, =, ≠, ‹…› і дає змогу налаштувати її зовнішній вигляд.")
+        prev_box = keyed_container("dict_zone_preview")
+        with prev_box:
+            render_zone_box_start()
+            errors, warnings = validate_dictionary_article(article)
+            if not errors and not warnings:
+                st.success("Стаття має повну базову структуру.")
+            else:
+                if errors:
+                    st.error("Обов’язкові елементи, які треба доповнити: " + "; ".join(errors))
+                if warnings:
+                    st.warning("Рекомендації для повнішого опису: " + "; ".join(warnings))
+
+            st.markdown("#### Редактор стилю попереднього перегляду")
+            st.caption("Ці налаштування змінюють лише вигляд попереднього перегляду й не змінюють лексикографічних даних у базі.")
+            st1, st2, st3 = st.columns([1.2, 0.7, 0.7])
+            with st1:
+                preview_font_choice = st.selectbox(
+                    "Шрифт статті",
+                    [
+                        "Georgia, Cambria, 'Times New Roman', serif",
+                        "Cormorant Garamond, Georgia, serif",
+                        "Inter, Segoe UI, Arial, sans-serif",
+                        "Times New Roman, Times, serif",
+                    ],
+                    index=0,
+                    key=f"preview_font_{current_word_id}",
+                )
+            with st2:
+                preview_font_size = st.slider("Розмір", min_value=14, max_value=26, value=18, step=1, key=f"preview_font_size_{current_word_id}")
+            with st3:
+                preview_compact = st.checkbox("Компактніше", value=False, key=f"preview_compact_{current_word_id}")
+
+            ready_entry_html = format_ready_dictionary_entry_html(article, preview_font_choice, int(preview_font_size), bool(preview_compact))
+            ready_entry = format_ready_dictionary_entry(article)
+            if ready_entry_html:
+                st.markdown(ready_entry_html, unsafe_allow_html=True)
+                st.markdown("<div class='dict-download-spacer'></div>", unsafe_allow_html=True)
+                st.download_button(
+                    "⬇️ Завантажити готову словникову статтю TXT",
+                    data=ready_entry.encode("utf-8-sig"),
+                    file_name=f"dictionary_article_{current_word_id}.txt",
+                    mime="text/plain",
+                    key=f"download_entry_{current_word_id}",
+                )
+            else:
+                st.info("Після збереження реєстрової одиниці тут з’явиться попередній перегляд словникової статті.")
+            render_zone_box_end()
+
+
+
+# Зберігаємо повний редактор як окрему функцію, а вкладку «Словник»
+# перетворюємо на дві підвкладки: перегляд і редагування.
+render_dictionary_editor_tab = render_dictionary_tab
+
+
+def render_dictionary_public_view() -> None:
+    ensure_dictionary_db_ready()
+    st.subheader("Словник мови Степана Бандери")
+    st.caption("Публічний перегляд уже створених словникових статей без доступу до редагування.")
+    query = st.text_input("Пошук словникової статті", placeholder="Наприклад: боротьба", key="dict_view_search")
+    words = cached_lexdb_search_words(query, limit=800)
+    if not words:
+        st.info("Поки що за цим запитом словникових статей не знайдено.")
+        return
+    selected_id = st.selectbox(
+        "Вибрати статтю для перегляду",
+        options=[int(w["ID"]) for w in words],
+        format_func=lambda x: next((str(w.get("НАГОЛОШЕНА ФОРМА") or w.get("РЕЄСТРОВА ОДИНИЦЯ") or x) for w in words if int(w["ID"]) == int(x)), str(x)),
+        key="dict_view_article_select",
+    )
+    article = cached_lexdb_get_dictionary_article_full(int(selected_id))
+
+    st.markdown("#### Налаштування вигляду статті")
+    st.caption("Ці налаштування змінюють лише вигляд публічного перегляду й не змінюють даних у базі.")
+    vc1, vc2, vc3 = st.columns([1.2, 0.7, 0.7])
+    with vc1:
+        view_font_choice = st.selectbox(
+            "Шрифт статті",
+            [
+                "Georgia, Cambria, 'Times New Roman', serif",
+                "Cormorant Garamond, Georgia, serif",
+                "Inter, Segoe UI, Arial, sans-serif",
+                "Times New Roman, Times, serif",
+            ],
+            index=0,
+            key=f"dict_view_font_{selected_id}",
+        )
+    with vc2:
+        view_font_size = st.slider("Розмір", min_value=14, max_value=26, value=18, step=1, key=f"dict_view_font_size_{selected_id}")
+    with vc3:
+        view_compact = st.checkbox("Компактніше", value=False, key=f"dict_view_compact_{selected_id}")
+
+    ready_entry_html = format_ready_dictionary_entry_html(article, view_font_choice, int(view_font_size), bool(view_compact))
+    ready_entry = format_ready_dictionary_entry(article)
+    if ready_entry_html:
+        st.markdown(ready_entry_html, unsafe_allow_html=True)
+        st.markdown("<div class='dict-download-spacer'></div>", unsafe_allow_html=True)
+        st.download_button(
+            "⬇️ Завантажити словникову статтю TXT",
+            data=ready_entry.encode("utf-8-sig"),
+            file_name=f"dictionary_article_{selected_id}.txt",
+            mime="text/plain",
+            key=f"dict_view_download_{selected_id}",
+        )
+    else:
+        st.info("Статтю ще не заповнено достатньо для попереднього перегляду.")
+
+
+def render_dictionary_tab(wordforms_df: pd.DataFrame) -> None:  # type: ignore[no-redef]
+    render_dictionary_css()
+    with keyed_container("dict_lower_tabs"):
+        view_tab, edit_tab = st.tabs(["👁︎ Дивитись", "✍︎ Редагувати"])
+        with view_tab:
+            render_dictionary_public_view()
+        with edit_tab:
+            render_dictionary_editor_tab(wordforms_df)
+
 
 st.markdown(
     """
@@ -1599,9 +2868,9 @@ st.markdown(
     button[role="tab"]:nth-of-type(2) p { --tab-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.1' stroke-linecap='round'%3E%3Cpath d='M5 20V10M12 20V4M19 20v-7'/%3E%3C/svg%3E"); }
     button[role="tab"]:nth-of-type(3) p { --tab-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.0' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6.5c2.6-1.2 5.3-1.2 8 0v13c-2.7-1.2-5.4-1.2-8 0zM12 6.5c2.7-1.2 5.4-1.2 8 0v13c-2.6-1.2-5.3-1.2-8 0z'/%3E%3C/svg%3E"); }
     button[role="tab"]:nth-of-type(4) p { --tab-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.0' stroke-linecap='round'%3E%3Cpath d='M8 6h12M8 12h12M8 18h12'/%3E%3Cpath d='M4 6h.01M4 12h.01M4 18h.01'/%3E%3C/svg%3E"); }
-    button[role="tab"]:nth-of-type(5) p { --tab-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.0' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 7h10M17 7l-3-3M17 7l-3 3M17 17H7M7 17l3-3M7 17l3 3'/%3E%3C/svg%3E"); }
+    button[role="tab"]:nth-of-type(5) p { --tab-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.0' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 4.8c2.7-1 5.1-.8 7 .6v14.2c-1.9-1.4-4.3-1.6-7-.6z'/%3E%3Cpath d='M12 5.4c1.9-1.4 4.3-1.6 7-.6V19c-2.7-1-5.1-.8-7 .6z'/%3E%3Cpath d='M8 8h1.8M8 11h1.8M14.3 8H16M14.3 11H16'/%3E%3C/svg%3E"); }
     button[role="tab"]:nth-of-type(6) p { --tab-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.0' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 7h10M17 7l-3-3M17 7l-3 3M17 17H7M7 17l3-3M7 17l3 3'/%3E%3C/svg%3E"); }
-    button[role="tab"]:nth-of-type(7) p { --tab-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.0' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 10v6M12 7h.01'/%3E%3C/svg%3E"); }
+    button[role="tab"]:nth-of-type(7) p { --tab-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.0' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 4.8c2.1-.9 4.3-.9 6.5 0V20c-2.2-.9-4.4-.9-6.5 0zM12.5 4.8c2.2-.9 4.4-.9 6.5 0V20c-2.1-.9-4.3-.9-6.5 0z'/%3E%3Cpath d='M12 5v15'/%3E%3C/svg%3E"); }
 
     /* Головна пошукова зона */
     [data-testid="stForm"] {
@@ -1779,6 +3048,11 @@ st.markdown(
         box-shadow: 0 8px 22px rgba(0,0,0,0.10);
     }
     .limit-info-note * { color: rgba(255, 248, 236, 0.96) !important; }
+    .concordance-download-spacer {
+        height: 1.05rem;
+        margin-top: 0.75rem;
+        border-top: 1px solid rgba(241,198,90,0.20);
+    }
 
     /* Тексти чекбоксів для підготовки повних файлів / ZIP на темному фоні */
     div[data-testid="stCheckbox"] label,
@@ -1795,6 +3069,59 @@ st.markdown(
     }
 
     /* Результати конкордансу */
+    .random-wordforms-title {
+        margin: 0.62rem auto 0.32rem auto;
+        text-align: center;
+        color: #f6d062 !important;
+        font-weight: 950;
+        letter-spacing: 0.02em;
+        text-shadow: 0 0 12px rgba(246,208,98,0.28);
+    }
+
+    /* Компактний центрований ряд випадкових словоформ */
+    div[class*="st-key-random_wordforms_row"] {
+        width: min(100%, 980px) !important;
+        margin: 0.1rem auto 0.8rem auto !important;
+        display: flex !important;
+        flex-wrap: wrap !important;
+        justify-content: center !important;
+        align-items: center !important;
+        gap: 9px 14px !important;
+    }
+    div[class*="st-key-random_wordforms_row"] > div {
+        width: auto !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        flex: 0 0 auto !important;
+    }
+    div[class*="st-key-random_wordforms_row"] div[data-testid="stButton"] {
+        width: auto !important;
+        margin: 0 !important;
+    }
+    div[class*="st-key-random_wordforms_row"] button {
+        width: auto !important;
+        min-width: 0 !important;
+        max-width: 190px !important;
+        min-height: 33px !important;
+        padding: 0.15rem 0.55rem !important;
+        color: #f6d062 !important;
+        font-weight: 950 !important;
+        font-size: clamp(12.5px, 0.95vw, 14px) !important;
+        border: 1px solid rgba(246,208,98,0.38) !important;
+        border-radius: 10px !important;
+        background: rgba(84, 0, 22, 0.30) !important;
+        box-shadow: 0 0 10px rgba(246,208,98,0.10) !important;
+        transition: box-shadow 0.18s ease, transform 0.18s ease, color 0.18s ease !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+    }
+    div[class*="st-key-random_wordforms_row"] button:hover {
+        color: #fff4b1 !important;
+        box-shadow: 0 0 18px rgba(246,208,98,0.62), 0 0 34px rgba(246,208,98,0.28) !important;
+        transform: translateY(-1px);
+    }
+
     .register-card {
         background: rgba(255,250,247,0.88);
         border: 1px solid rgba(176,112,44,0.18);
@@ -2280,7 +3607,7 @@ st.markdown(
     "<div class='hero-panel'>"
     "<div class='hero-text'>"
     "<div class='site-brand'>БАНДЕРОГРАФІЯ</div>"
-    "<div class='site-subtitle'>Електронний конкорданс творів-першодруків Степана Бандери</div>"
+    "<div class='site-subtitle'>Лінгвістичний портал</div>"
     "<div class='hero-quote'>Змістом мойого життя досі була боротьба,<br>так і мусить бути дальше</div>"
     "</div>"
     f"{portrait_html}"
@@ -2312,13 +3639,21 @@ search_tab, freq_tab, corpus_tab, articles_tab, dictionary_tab, variants_tab, ab
 
 with search_tab:
     with st.form("search_form"):
-        main_col, button_col = st.columns([5.45, 1.18], vertical_alignment="bottom")
+        main_col, select_col, button_col = st.columns([3.25, 2.2, 1.18], vertical_alignment="bottom")
+        alpha_wordform_options = sorted(wordforms_df["wordform"].dropna().astype(str).unique().tolist(), key=str.casefold)
         with main_col:
             query_text = st.text_area(
                 "Словоформа / словоформи для пошуку",
                 placeholder="Наприклад: України, революції, ОУН",
                 height=62,
                 help="Введи одну або кілька словоформ і натисни кнопку «Пошук». Можна розділяти словоформи комами, крапками з комою або новими рядками.",
+            )
+        with select_col:
+            selected_alpha_wordform = st.selectbox(
+                "Або виберіть словоформу за абеткою",
+                options=["— не вибрано —"] + alpha_wordform_options,
+                index=0,
+                key="concordance_alpha_wordform_select",
             )
         with button_col:
             search_clicked = st.form_submit_button("Пошук", type="primary")
@@ -2338,11 +3673,31 @@ with search_tab:
             with col4:
                 variants_choice = st.selectbox("Об’єднувати варіянти", ["Так", "Ні"], index=0)
                 use_variants = variants_choice == "Так"
-                st.markdown("<div class='advanced-note'>Для варіянтних слів зберігається оригінальне написання в контексті.</div>", unsafe_allow_html=True)
+
+    random_candidates = [w for w in wordforms_df["wordform"].dropna().astype(str).tolist() if w.strip()]
+    if random_candidates:
+        if "concordance_random_wordforms" not in st.session_state:
+            st.session_state["concordance_random_wordforms"] = random.sample(random_candidates, min(8, len(random_candidates)))
+        st.markdown("<div class='random-wordforms-title'>Випадкові словоформи з корпусу</div>", unsafe_allow_html=True)
+        with keyed_container("random_wordforms_row"):
+            for idx, wf in enumerate(st.session_state.get("concordance_random_wordforms", [])[:8]):
+                if st.button(wf, key=f"random_wordform_{idx}_{wf}"):
+                    st.session_state["last_search"] = {
+                        "queries": parse_queries(wf),
+                        "mode": mode,
+                        "depth": int(depth),
+                        "use_variants": bool(use_variants),
+                        "max_rows": int(max_rows),
+                        "selected_codes": [],
+                    }
+                    fast_rerun()
 
     if search_clicked:
+        chosen_query = query_text.strip()
+        if not chosen_query and selected_alpha_wordform != "— не вибрано —":
+            chosen_query = selected_alpha_wordform
         st.session_state["last_search"] = {
-            "queries": parse_queries(query_text),
+            "queries": parse_queries(chosen_query),
             "mode": mode,
             "depth": int(depth),
             "use_variants": bool(use_variants),
@@ -2429,6 +3784,7 @@ with search_tab:
                     )
 
                 shown_export = concordance_export_df(result_df)
+                st.markdown("<div class='concordance-download-spacer'></div>", unsafe_allow_html=True)
                 dl1, dl2 = st.columns([1, 1])
                 with dl1:
                     st.download_button(
@@ -2734,7 +4090,7 @@ with variants_tab:
                 add_excluded_variant_group(row)
                 st.cache_data.clear()
                 st.success("Групу вилучено й збережено. Вона більше не вважатиметься варіянтною групою.")
-                st.rerun()
+                fast_rerun()
 
         if excluded_items:
             with st.expander("Вилучені групи", expanded=False):
@@ -2754,7 +4110,7 @@ with variants_tab:
                     restore_excluded_variant_group(restore_signature)
                     st.cache_data.clear()
                     st.success("Групу повернено до варіянтних слів.")
-                    st.rerun()
+                    fast_rerun()
 
         vd1, vd2 = st.columns([1, 1])
         with vd1:
