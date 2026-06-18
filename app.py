@@ -2509,7 +2509,7 @@ def render_dictionary_public_view() -> None:
     selected_id = st.selectbox(
         "Вибрати статтю для перегляду",
         options=[int(w["ID"]) for w in words],
-        format_func=lambda x: next((str(w.get("НАГОЛОШЕНА ФОРМА") or w.get("РЕЄСТРОВА ОДИНИЦЯ") or x) for w in words if int(w["ID"]) == int(x)), str(x)),
+        format_func=lambda x: next((str(w.get("РЕЄСТРОВА ОДИНИЦЯ")) for w in words if int(w["ID"]) == int(x)), str(x)),
         key="dict_view_article_select",
     )
     article = cached_lexdb_get_dictionary_article_full(int(selected_id))
